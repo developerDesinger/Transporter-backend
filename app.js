@@ -31,11 +31,28 @@ const usersRoutes = require("./src/api/v1/routes/user");
 const app = express();
 //const admin = require("firebase-admin");
 
+// CORS must be configured BEFORE other middleware
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
+}));
+
+// Handle preflight requests
+app.options('*', cors());
+
 // Middleware
 app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ limit: "100mb", extended: true }));
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-app.use(helmet());
+
+// Configure Helmet to not interfere with CORS
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginEmbedderPolicy: false
+}));
 
 if (process.env.NODE_ENV === "DEVELOPMENT") {
   app.use(logger("dev"));
@@ -82,22 +99,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Super simple CORS - allow everything
-app.use(cors({
-  origin: '*',
-  credentials: false,
-  methods: '*',
-  allowedHeaders: '*',
-  exposedHeaders: '*'
-}));
-
-// Simple fallback for any CORS issues
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', '*');
-  res.header('Access-Control-Allow-Headers', '*');
-  next();
-});
 app.use(compression());
 app.use(cookieParser());
 
