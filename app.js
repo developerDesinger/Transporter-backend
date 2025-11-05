@@ -28,6 +28,7 @@ if (process.env.NODE_ENV === "PRODUCTION") {
 
 const usersRoutes = require("./src/api/v1/routes/user");
 const organizationRoutes = require("./src/api/v1/routes/organization");
+const masterDataRoutes = require("./src/api/v1/routes/masterData");
 
 const app = express();
 //const admin = require("firebase-admin");
@@ -206,6 +207,7 @@ app.get("/test-upload", (req, res) => {
 // Routes
 app.use("/api/v1/users", usersRoutes);
 app.use("/api/v1", organizationRoutes);
+app.use("/api/v1", masterDataRoutes);
 // app.use("/api/v1/cron", cronRoutes);
 
 app.post("/upload-image", async (req, res) => {

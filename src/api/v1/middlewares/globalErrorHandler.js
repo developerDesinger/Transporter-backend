@@ -23,31 +23,42 @@ const sendErrorDev = (err, res) => {
   console.log("Error: ", err.message);
   console.log("Stack: ", err.stack);
 
-  return res.status(err.statusCode).json({
-    status: false,
-    // status: err.status,
+  const response = {
+    success: false,
     message: err.message,
     stack: err.stack, // Stack trace should be included in development only
-    data: [],
-  });
+  };
+
+  // Include validation errors if present
+  if (err.errors && Array.isArray(err.errors)) {
+    response.errors = err.errors;
+  }
+
+  return res.status(err.statusCode).json(response);
 };
 
 // Production error handler: Hides detailed error stack and logs for unknown errors
 const sendErrorProd = (err, res) => {
   // Only send operational errors to the client
   if (err.isOperational) {
-    return res.status(err.statusCode).json({
-      status: false,
+    const response = {
+      success: false,
       message: err.message,
-      data: null,
-    });
+    };
+
+    // Include validation errors if present
+    if (err.errors && Array.isArray(err.errors)) {
+      response.errors = err.errors;
+    }
+
+    return res.status(err.statusCode).json(response);
   }
 
   // For unknown or programming errors, hide details and log them
   console.error("ERROR 💥", err);
 
   return res.status(500).json({
-    status: false,
+    success: false,
     message: "Something went wrong! Please try again later.",
   });
 };
