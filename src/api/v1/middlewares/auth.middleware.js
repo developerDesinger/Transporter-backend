@@ -39,7 +39,7 @@ const isAuthenticated = async (req, res, next) => {
     }
 
     const user = await User.findById(decoded.id).select(
-      "_id email password role status fullName profilePhoto userName createdAt updatedAt"
+      "_id email password role status fullName profilePhoto userName isSuperAdmin permissions activeOrganizationId createdAt updatedAt"
     );
 
     if (!user) {

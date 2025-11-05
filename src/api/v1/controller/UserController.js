@@ -3,7 +3,19 @@ const catchAsyncHandler = require("../utils/catchAsyncHandler");
 
 class UserController {
   static createUser = catchAsyncHandler(async (req, res) => {
-    const result = await UserService.createUser(req.body);
+    // Check if this is an admin creation (user is authenticated and has permission)
+    let isAdminCreation = false;
+    if (req.user) {
+      try {
+        const { hasPermission } = require("../middlewares/permission.middleware");
+        isAdminCreation = await hasPermission(req.user, "system.users.manage");
+      } catch (error) {
+        // If permission check fails, treat as regular registration
+        isAdminCreation = false;
+      }
+    }
+    
+    const result = await UserService.createUser(req.body, isAdminCreation);
     return res.status(201).json(result);
   });
 
@@ -44,8 +56,12 @@ class UserController {
   });
 
   static getAllUsers = catchAsyncHandler(async (req, res) => {
-    const users = await UserService.getAllUsers(req.query);
-    return res.status(200).json(users);
+    const result = await UserService.getAllUsers(req.query);
+    // Return array format for frontend compatibility
+    if (result.data) {
+      return res.status(200).json(result.data);
+    }
+    return res.status(200).json(result);
   });
 
 
@@ -158,6 +174,30 @@ class UserController {
   static getUserPermissions = catchAsyncHandler(async (req, res) => {
     const { id: userId } = req.user;
     const result = await UserService.getUserPermissions(userId);
+    return res.status(200).json(result);
+  });
+
+  // Get user permissions by user ID (for admin access control page)
+  static getUserPermissionsById = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const customOnly = req.query.customOnly === "true"; // Return only custom permissions
+    const result = await UserService.getUserPermissions(id, customOnly);
+    return res.status(200).json(result);
+  });
+
+  // Update user permissions (for admin access control page)
+  static updateUserPermissions = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { permissions } = req.body;
+
+    if (!permissions || !Array.isArray(permissions)) {
+      return res.status(400).json({
+        success: false,
+        message: "Permissions array is required.",
+      });
+    }
+
+    const result = await UserService.updateUserPermissions(id, permissions);
     return res.status(200).json(result);
   });
 

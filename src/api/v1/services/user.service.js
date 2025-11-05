@@ -12,12 +12,20 @@ const { getPermissionsForRole } = require("../utils/permissions");
 const UserOrganization = require("../models/userOrganization.model");
 
 class UserService {
-  static async createUser(data) {
-    const { email, fullName, profilePhoto, role, password } = data;
+  static async createUser(data, isAdminCreation = false) {
+    const { email, fullName, profilePhoto, role, password, userName } = data;
 
-    if (!email || !password) {
+    if (!email) {
       throw new AppError(
-        "Email and password are required.",
+        "Email is required.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // For admin creation, password is optional (will be auto-generated if not provided)
+    if (!isAdminCreation && !password) {
+      throw new AppError(
+        "Password is required.",
         HttpStatusCodes.BAD_REQUEST
       );
     }
@@ -44,42 +52,88 @@ class UserService {
 
     // Static OTP for now
     let otp = "123456";
+    let tempPassword = null;
+
+    // Generate password if not provided (for admin creation)
+    let finalPassword = password;
+    if (!finalPassword && isAdminCreation) {
+      // Generate random password
+      tempPassword = crypto.randomBytes(12).toString("base64").slice(0, 12);
+      finalPassword = tempPassword;
+    }
 
     // Prepare user data
-    // According to flow: Registration → PENDING_VERIFICATION → OTP Verification → PENDING_APPROVAL → Approval → ACTIVE
     const userData = {
       email,
       fullName,
-      requestedRole: role || "STAFF",
-      role: "STAFF", // Default role until approved
-      status: "PENDING_VERIFICATION", // Initial status after registration
-      approvalStatus: "PENDING", // Will be approved after super admin approval
-      otp,
       profilePhoto,
-      otpCreatedAt: new Date(),
       isSuperAdmin: false,
     };
 
-    // Add password if provided
-    if (password) {
-      userData.password = await bcrypt.hash(password, 10);
+    // Admin creation bypasses OTP and approval
+    if (isAdminCreation) {
+      userData.requestedRole = role || "STAFF";
+      userData.role = role || "STAFF"; // Set role immediately
+      userData.status = "ACTIVE"; // Active immediately
+      userData.approvalStatus = "APPROVED"; // Approved immediately
+      userData.userName = userName || email.split("@")[0]; // Auto-generate from email
+    } else {
+      // Regular registration flow
+      userData.requestedRole = role || "STAFF";
+      userData.role = "STAFF"; // Default role until approved
+      userData.status = "PENDING_VERIFICATION"; // Initial status after registration
+      userData.approvalStatus = "PENDING"; // Will be approved after super admin approval
+      userData.otp = otp;
+      userData.otpCreatedAt = new Date();
+    }
+
+    // Add password if provided or generated
+    if (finalPassword) {
+      userData.password = await bcrypt.hash(finalPassword, 10);
     }
 
     if (user) {
-      // User exists but is inactive or pending - resend OTP and update role
-      user.fullName = fullName;
-      user.profilePhoto = profilePhoto;
-      user.requestedRole = role || "STAFF";
-      user.status = "PENDING_VERIFICATION"; // Reset to verification stage
-      user.approvalStatus = "PENDING";
-      user.otp = otp;
-      user.otpCreatedAt = new Date();
-      user.isSuperAdmin = false;
-      if (password) user.password = await bcrypt.hash(password, 10);
-      await user.save();
+      // User exists but is inactive or pending
+      if (isAdminCreation) {
+        // Admin can reactivate existing users
+        user.fullName = fullName;
+        user.profilePhoto = profilePhoto;
+        user.requestedRole = role || "STAFF";
+        user.role = role || "STAFF";
+        user.status = "ACTIVE";
+        user.approvalStatus = "APPROVED";
+        user.isSuperAdmin = false;
+        if (userName) user.userName = userName;
+        if (finalPassword) user.password = await bcrypt.hash(finalPassword, 10);
+        await user.save();
+      } else {
+        // Regular flow - resend OTP
+        user.fullName = fullName;
+        user.profilePhoto = profilePhoto;
+        user.requestedRole = role || "STAFF";
+        user.status = "PENDING_VERIFICATION";
+        user.approvalStatus = "PENDING";
+        user.otp = otp;
+        user.otpCreatedAt = new Date();
+        user.isSuperAdmin = false;
+        if (finalPassword) user.password = await bcrypt.hash(finalPassword, 10);
+        await user.save();
+      }
     } else {
-      // Create new user with or without password
+      // Create new user
       user = await User.create(userData);
+    }
+
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(user);
+
+    if (isAdminCreation) {
+      return {
+        message: "User created successfully",
+        success: true,
+        user: formattedUser,
+        tempPassword: tempPassword, // Return temp password if generated
+      };
     }
 
     return {
@@ -712,15 +766,24 @@ class UserService {
   /**
    * Get user permissions based on role and organization role
    * @param {string} userId - User ID
+   * @param {boolean} customOnly - If true, return only custom permissions (not role-based)
    * @returns {Object} Permissions object
    */
-  static async getUserPermissions(userId) {
+  static async getUserPermissions(userId, customOnly = false) {
     const user = await User.findById(userId).select(
       "_id role isSuperAdmin permissions activeOrganizationId"
     );
 
     if (!user) {
       throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // If only custom permissions requested, return those
+    if (customOnly) {
+      return {
+        permissions: user.permissions || [],
+        success: true,
+      };
     }
 
     // Check if user is tenant admin
@@ -747,6 +810,49 @@ class UserService {
     return {
       permissions,
       success: true,
+    };
+  }
+
+  /**
+   * Update user custom permissions
+   * @param {string} userId - User ID
+   * @param {Array} permissions - Array of permission strings
+   * @returns {Object} Updated permissions
+   */
+  static async updateUserPermissions(userId, permissions) {
+    const user = await User.findById(userId);
+
+    if (!user) {
+      throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate permissions format
+    if (!Array.isArray(permissions)) {
+      throw new AppError(
+        "Permissions must be an array.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate permission format (category.module.action)
+    const permissionPattern = /^[a-z_]+\.[a-z_]+\.[a-z_]+$/;
+    for (const permission of permissions) {
+      if (typeof permission !== "string" || !permissionPattern.test(permission)) {
+        throw new AppError(
+          `Invalid permission format: ${permission}. Expected format: category.module.action`,
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+    }
+
+    // Update user permissions
+    user.permissions = [...new Set(permissions)]; // Remove duplicates
+    await user.save();
+
+    return {
+      success: true,
+      message: "Permissions updated successfully",
+      permissions: user.permissions,
     };
   }
 
