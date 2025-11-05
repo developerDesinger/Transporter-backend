@@ -7,6 +7,9 @@ const HttpStatusCodes = require("../enums/httpStatusCode");
 const { createJwtToken } = require("../middlewares/auth.middleware");
 const { s3SharpImageUpload } = require("../services/aws.service");
 const { sendEmail, sendForgotPasswordEmail } = require("../utils/email");
+const { formatUserWithRBAC, formatUsersWithRBAC } = require("../utils/userRBACFormatter");
+const { getPermissionsForRole } = require("../utils/permissions");
+const UserOrganization = require("../models/userOrganization.model");
 
 class UserService {
   static async createUser(data) {
@@ -43,16 +46,18 @@ class UserService {
     let otp = "123456";
 
     // Prepare user data
+    // According to flow: Registration → PENDING_VERIFICATION → OTP Verification → PENDING_APPROVAL → Approval → ACTIVE
     const userData = {
       email,
       fullName,
       requestedRole: role || "STAFF",
       role: "STAFF", // Default role until approved
-      status: "INACTIVE",
-      approvalStatus: "APPROVED",
+      status: "PENDING_VERIFICATION", // Initial status after registration
+      approvalStatus: "PENDING", // Will be approved after super admin approval
       otp,
       profilePhoto,
       otpCreatedAt: new Date(),
+      isSuperAdmin: false,
     };
 
     // Add password if provided
@@ -61,13 +66,15 @@ class UserService {
     }
 
     if (user) {
-      // User exists but is inactive - resend OTP and update role
+      // User exists but is inactive or pending - resend OTP and update role
       user.fullName = fullName;
       user.profilePhoto = profilePhoto;
       user.requestedRole = role || "STAFF";
+      user.status = "PENDING_VERIFICATION"; // Reset to verification stage
       user.approvalStatus = "PENDING";
       user.otp = otp;
       user.otpCreatedAt = new Date();
+      user.isSuperAdmin = false;
       if (password) user.password = await bcrypt.hash(password, 10);
       await user.save();
     } else {
@@ -198,12 +205,12 @@ class UserService {
     const { email, password, role } = data;
     if (!email || !password) {
       return {
-        message: "Email, password, and role are required.",
+        message: "Email and password are required.",
         success: false,
       };
     }
     const user = await User.findOne({ email }).select(
-      "_id email password role status fullName profilePhoto userName createdAt updatedAt"
+      "_id email password role status fullName name profilePhoto userName isSuperAdmin activeOrganizationId permissions createdAt updatedAt"
     );
     if (!user) {
       return {
@@ -219,12 +226,7 @@ class UserService {
         success: false,
       };
     }
-    // if (user.role !== role) {
-    //   throw new AppError(
-    //     "Role mismatch. Access denied.",
-    //     HttpStatusCodes.UNAUTHORIZED
-    //   );
-    // }
+    
     if (user.status === "PENDING_APPROVAL") {
       return {
         message: "Your account is pending approval from super admin. Please wait for approval.",
@@ -250,12 +252,19 @@ class UserService {
       };
     }
 
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(user);
+    
     const token = createJwtToken({ id: user.id, role: user.role });
     return {
       message: "Login successful.",
       success: true,
-      user,
-      token,
+      data: {
+        token,
+        user: formattedUser,
+      },
+      user: formattedUser, // Keep for backward compatibility
+      token, // Keep for backward compatibility
     };
   }
 
@@ -286,6 +295,7 @@ class UserService {
         role: "STAFF",
         status: "ACTIVE",
         profilePhoto,
+        isSuperAdmin: false,
       });
     } else {
       // Update login type if different
@@ -303,12 +313,19 @@ class UserService {
       }
     }
 
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(user);
+    
     const token = createJwtToken({ id: user.id, role: user.role });
     return {
       message: "Social login successful.",
       success: true,
-      user,
-      token,
+      data: {
+        token,
+        user: formattedUser,
+      },
+      user: formattedUser, // Keep for backward compatibility
+      token, // Keep for backward compatibility
     };
   }
 
@@ -321,6 +338,7 @@ class UserService {
     const totalPages = Math.ceil(totalUsers / limit);
 
     const users = await User.find({ status: "ACTIVE" })
+      .select("_id email fullName name role status isSuperAdmin activeOrganizationId permissions createdAt updatedAt")
       .skip(skip)
       .limit(limit)
       .sort({ createdAt: -1 });
@@ -339,10 +357,13 @@ class UserService {
       };
     }
 
+    // Format users with RBAC data
+    const formattedUsers = await formatUsersWithRBAC(users);
+
     return {
       message: "Users fetched successfully.",
       success: true,
-      data: users,
+      data: formattedUsers,
       pagination: {
         currentPage: page,
         totalPages,
@@ -383,7 +404,30 @@ class UserService {
 
   static async updateUser(userId, updateData) {
     // Remove password field if present in updateData
-    const { password, ...dataToUpdate } = updateData;
+    const { password, orgRole, organizationId, ...dataToUpdate } = updateData;
+
+    // Handle organization role update if provided
+    if (orgRole && organizationId) {
+      // Validate orgRole
+      if (!["TENANT_ADMIN", "MEMBER"].includes(orgRole)) {
+        throw new AppError(
+          "Invalid orgRole. Allowed values: TENANT_ADMIN, MEMBER",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      // Update or create user-organization relationship
+      await UserOrganization.findOneAndUpdate(
+        { userId, organizationId },
+        { orgRole, status: "ACTIVE" },
+        { upsert: true, new: true }
+      );
+
+      // If setting as active organization, update user's activeOrganizationId
+      if (updateData.setAsActive) {
+        dataToUpdate.activeOrganizationId = organizationId;
+      }
+    }
 
     const updatedUser = await User.findByIdAndUpdate(userId, dataToUpdate, {
       new: true,
@@ -393,21 +437,30 @@ class UserService {
       throw new AppError("User profile not found.", HttpStatusCodes.NOT_FOUND);
     }
 
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(updatedUser);
+
     return {
       message: "User profile updated successfully.",
-      profile: updatedUser,
+      user: formattedUser,
+      profile: formattedUser, // Keep for backward compatibility
       success: true,
     };
   }
 
   static async getUser(userId) {
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).select(
+      "_id email fullName name role status isSuperAdmin activeOrganizationId permissions profilePhoto userName createdAt updatedAt"
+    );
 
     if (!user) throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
 
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(user);
+
     return {
-      message: "User updated successfully.",
-      user,
+      message: "User fetched successfully.",
+      user: formattedUser,
       success: true,
     };
   }
@@ -596,13 +649,18 @@ class UserService {
   }
 
   static async getUserByToken(userId) {
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).select(
+      "_id email fullName name role status isSuperAdmin activeOrganizationId permissions profilePhoto userName createdAt updatedAt"
+    );
 
     if (!user) throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
 
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(user);
+
     return {
-      message: "User updated successfully.",
-      user,
+      message: "User fetched successfully.",
+      user: formattedUser,
       success: true,
     };
   }
@@ -622,21 +680,142 @@ class UserService {
     const totalPages = Math.ceil(totalUsers / limit);
 
     const users = await User.find(filter)
-      .select("_id email fullName requestedRole status approvalStatus createdAt")
+      .select("_id email fullName name requestedRole role status approvalStatus createdAt")
       .skip(skip)
       .limit(limit)
       .sort({ createdAt: -1 });
 
+    // Format users to match expected structure
+    const formattedUsers = users.map(user => ({
+      id: user._id.toString(),
+      _id: user._id.toString(),
+      email: user.email,
+      fullName: user.fullName || user.name,
+      role: user.requestedRole || user.role,
+      status: user.status,
+      createdAt: user.createdAt,
+    }));
+
     return {
       message: "Pending approvals fetched successfully.",
       success: true,
-      data: users,
+      data: formattedUsers,
       pagination: {
         currentPage: page,
         totalPages,
         totalItems: totalUsers,
         limit,
       },
+    };
+  }
+
+  /**
+   * Get user permissions based on role and organization role
+   * @param {string} userId - User ID
+   * @returns {Object} Permissions object
+   */
+  static async getUserPermissions(userId) {
+    const user = await User.findById(userId).select(
+      "_id role isSuperAdmin permissions activeOrganizationId"
+    );
+
+    if (!user) {
+      throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if user is tenant admin
+    let isTenantAdmin = false;
+    if (user.activeOrganizationId) {
+      const userOrg = await UserOrganization.findOne({
+        userId: user._id,
+        organizationId: user.activeOrganizationId,
+        status: "ACTIVE"
+      });
+      isTenantAdmin = userOrg && userOrg.orgRole === "TENANT_ADMIN";
+    }
+
+    const isSuperAdmin = user.isSuperAdmin === true || user.role === "SUPER_ADMIN";
+    
+    // Get permissions based on role
+    const permissions = getPermissionsForRole(
+      user.role,
+      isSuperAdmin,
+      isTenantAdmin,
+      user.permissions || []
+    );
+
+    return {
+      permissions,
+      success: true,
+    };
+  }
+
+  /**
+   * Switch user's active organization
+   * @param {string} userId - User ID
+   * @param {string} organizationId - Organization ID to switch to
+   * @returns {Object} Updated user object
+   */
+  static async switchOrganization(userId, organizationId) {
+    const user = await User.findById(userId);
+
+    if (!user) {
+      throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Super admin can switch to any organization (or no organization)
+    if (user.isSuperAdmin || user.role === "SUPER_ADMIN") {
+      const updatedUser = await User.findByIdAndUpdate(
+        userId,
+        { activeOrganizationId: organizationId || null },
+        { new: true }
+      ).select("_id email fullName name role status isSuperAdmin activeOrganizationId permissions profilePhoto userName createdAt updatedAt");
+
+      const formattedUser = await formatUserWithRBAC(updatedUser);
+      
+      return {
+        message: "Organization switched successfully.",
+        success: true,
+        user: formattedUser,
+      };
+    }
+
+    // Regular users can only switch to organizations they belong to
+    if (!organizationId) {
+      throw new AppError(
+        "Organization ID is required for non-super admin users.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Verify user belongs to this organization
+    const userOrg = await UserOrganization.findOne({
+      userId: user._id,
+      organizationId: organizationId,
+      status: "ACTIVE"
+    });
+
+    if (!userOrg) {
+      throw new AppError(
+        "You do not belong to this organization.",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Update active organization
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { activeOrganizationId: organizationId },
+      { new: true }
+    ).select("_id email fullName name role status isSuperAdmin activeOrganizationId permissions profilePhoto userName createdAt updatedAt");
+
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(updatedUser);
+
+    return {
+      message: "Organization switched successfully.",
+      success: true,
+      user: formattedUser,
     };
   }
 
@@ -675,18 +854,13 @@ class UserService {
       { new: true }
     );
 
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(updatedUser);
+
     return {
       message: "User approved successfully.",
       success: true,
-      user: {
-        id: updatedUser.id,
-        email: updatedUser.email,
-        fullName: updatedUser.fullName,
-        role: updatedUser.role,
-        status: updatedUser.status,
-        approvalStatus: updatedUser.approvalStatus,
-        approvedAt: updatedUser.approvedAt,
-      },
+      user: formattedUser,
     };
   }
 

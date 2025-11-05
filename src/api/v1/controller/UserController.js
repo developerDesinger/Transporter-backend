@@ -155,6 +155,19 @@ class UserController {
     return res.status(200).json(result);
   });
 
+  static getUserPermissions = catchAsyncHandler(async (req, res) => {
+    const { id: userId } = req.user;
+    const result = await UserService.getUserPermissions(userId);
+    return res.status(200).json(result);
+  });
+
+  static switchOrganization = catchAsyncHandler(async (req, res) => {
+    const { id: userId } = req.user;
+    const { organizationId } = req.body;
+
+    const result = await UserService.switchOrganization(userId, organizationId);
+    return res.status(200).json(result);
+  });
 
 }
 

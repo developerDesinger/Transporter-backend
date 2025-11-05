@@ -15,6 +15,8 @@ router.post("/update-password", UserController.updatePassword);
 
 // Authenticated routes
 router.get("/user-by-token", isAuthenticated, UserController.getUserByToken);
+router.get("/permissions", isAuthenticated, UserController.getUserPermissions);
+router.post("/switch-organization", isAuthenticated, UserController.switchOrganization);
 router.post("/change-password", isAuthenticated, UserController.changePassword);
 
 // Super Admin only routes - Approval Management (must come before parameterized routes)

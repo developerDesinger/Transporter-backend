@@ -17,8 +17,10 @@ const seedDatabaseAndCreateSuperAdmin = async () => {
         email: "luke@inov8ive.com.au",
         password: hashedPassword,
         role: "SUPER_ADMIN",
+        isSuperAdmin: true, // RBAC: Set super admin flag
         userName: "Transporter super_admin",
         fullName: "Transporter super_admin",
+        name: "Transporter super_admin", // Alternative name field
         status: "ACTIVE",
         approvalStatus: "APPROVED",
       });
