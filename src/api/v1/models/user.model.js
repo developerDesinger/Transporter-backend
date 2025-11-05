@@ -9,7 +9,7 @@ const UserSchema = new mongoose.Schema(
     role: { type: String, enum: ["SUPER_ADMIN", "ADMIN", "OPERATIONS", "FINANCE", "DRIVER", "STAFF"], default: "STAFF" },
     requestedRole: { type: String, enum: ["ADMIN", "OPERATIONS", "FINANCE", "DRIVER", "STAFF"] },
     status: { type: String, enum: ["ACTIVE", "INACTIVE", "PENDING_APPROVAL", "REJECTED"], default: "PENDING_APPROVAL" },
-    approvalStatus: { type: String, enum: ["PENDING", "APPROVED", "REJECTED"], default: "PENDING" },
+    approvalStatus: { type: String, enum: ["PENDING", "APPROVED", "REJECTED"], default: "APPROVED" },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     approvedAt: { type: Date },
     otp: { type: String },

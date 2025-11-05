@@ -2,6 +2,13 @@ const jwt = require("jsonwebtoken");
 const AppError = require("../utils/AppError");
 const User = require("../models/user.model");
 
+// Validate JWT_SECRET is set
+if (!process.env.JWT_SECRET) {
+  console.error("❌ ERROR: JWT_SECRET environment variable is not set!");
+  console.error("Please set JWT_SECRET in your .env file");
+  throw new Error("JWT_SECRET environment variable is required");
+}
+
 const isAuthenticated = async (req, res, next) => {
   try {
     const bearerToken = req.headers["authorization"];
@@ -113,8 +120,12 @@ const switchRole = async (req, res) => {
 };
 
 const createJwtToken = (payload) => {
+  if (!process.env.JWT_SECRET) {
+    throw new Error("JWT_SECRET is not configured. Please set it in your .env file");
+  }
+  
   return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN,
+    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
   });
 };
 

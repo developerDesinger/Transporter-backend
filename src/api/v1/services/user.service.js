@@ -40,7 +40,7 @@ class UserService {
     }
 
     // Static OTP for now
-    let otp = "1234";
+    let otp = "123456";
 
     // Prepare user data
     const userData = {
@@ -49,7 +49,7 @@ class UserService {
       requestedRole: role || "STAFF",
       role: "STAFF", // Default role until approved
       status: "INACTIVE",
-      approvalStatus: "PENDING",
+      approvalStatus: "APPROVED",
       otp,
       profilePhoto,
       otpCreatedAt: new Date(),
@@ -181,7 +181,7 @@ class UserService {
     }
 
     // const otp = crypto.randomInt(100000, 999999).toString();
-    const otp = "1234";
+    const otp = "123456";
 
     await User.findByIdAndUpdate(user.id, { otp, otpCreatedAt: new Date() });
     // await sendEmail({ email, otp });
