@@ -1,0 +1,8 @@
+{
+  "OrderPlaced": {
+    "title": "Order Has Been Placed",
+    "body": "Your order has been placed successfully",
+    "eventName": "OrderPlaced"
+  }
+  
+}

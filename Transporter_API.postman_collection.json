@@ -1,0 +1,853 @@
+{
+  "info": {
+    "name": "Transporter Backend API",
+    "description": "Complete API collection for Transport Management System including authentication, user management, and approval workflows",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "transporter-backend-2024"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string",
+      "description": "Base URL for the API"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string",
+      "description": "JWT authentication token (auto-saved after login)"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string",
+      "description": "User ID (auto-saved after registration)"
+    },
+    {
+      "key": "superAdminToken",
+      "value": "",
+      "type": "string",
+      "description": "Super admin token for approval endpoints"
+    }
+  ],
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Register User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "    try {",
+                  "        const responseJson = pm.response.json();",
+                  "        if (responseJson.user && responseJson.user.id) {",
+                  "            pm.collectionVariables.set('userId', responseJson.user.id);",
+                  "            console.log('✅ User ID saved:', responseJson.user.id);",
+                  "        }",
+                  "    } catch (e) {",
+                  "        console.log('Error parsing response:', e);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"Password123\",\n  \"fullName\": \"John Doe\",\n  \"role\": \"ADMIN\",\n  \"profilePhoto\": \"https://example.com/photo.jpg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/create",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "create"]
+            },
+            "description": "Register a new user. User must verify OTP and wait for super admin approval.\n\n**Roles available:** ADMIN, OPERATIONS, FINANCE, DRIVER, STAFF\n\n**Note:** Static OTP is currently set to '1234'"
+          },
+          "response": []
+        },
+        {
+          "name": "Verify OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    console.log('✅ OTP verified successfully. Account is now pending approval.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"otp\": \"1234\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/verify-otp",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "verify-otp"]
+            },
+            "description": "Verify OTP after registration. After verification, account status changes to PENDING_APPROVAL and user must wait for super admin approval."
+          },
+          "response": []
+        },
+        {
+          "name": "Resend OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/resend-otp",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "resend-otp"]
+            },
+            "description": "Resend OTP to user's email"
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    try {",
+                  "        const responseJson = pm.response.json();",
+                  "        if (responseJson.data && responseJson.data.token) {",
+                  "            pm.collectionVariables.set('token', responseJson.data.token);",
+                  "            console.log('✅ Login token saved');",
+                  "        } else if (responseJson.token) {",
+                  "            pm.collectionVariables.set('token', responseJson.token);",
+                  "            console.log('✅ Login token saved');",
+                  "        }",
+                  "        if (responseJson.user && responseJson.user._id) {",
+                  "            pm.collectionVariables.set('userId', responseJson.user._id);",
+                  "        } else if (responseJson.data && responseJson.data.user && responseJson.data.user._id) {",
+                  "            pm.collectionVariables.set('userId', responseJson.data.user._id);",
+                  "        }",
+                  "    } catch (e) {",
+                  "        console.log('Error parsing response:', e);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"Password123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "login"]
+            },
+            "description": "Login user. Returns JWT token if account is ACTIVE and approved."
+          },
+          "response": []
+        },
+        {
+          "name": "Social Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    try {",
+                  "        const responseJson = pm.response.json();",
+                  "        if (responseJson.token) {",
+                  "            pm.collectionVariables.set('token', responseJson.token);",
+                  "        }",
+                  "    } catch (e) {",
+                  "        console.log('Error:', e);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"provider\": \"GOOGLE\",\n  \"providerId\": \"google-oauth-sub-123\",\n  \"userName\": \"johndoe\",\n  \"profilePhoto\": \"https://example.com/avatar.jpg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/social-login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "social-login"]
+            },
+            "description": "Social login (Google, Apple, Facebook)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get User by Token",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/user-by-token",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "user-by-token"]
+            },
+            "description": "Get current authenticated user information"
+          },
+          "response": []
+        }
+      ],
+      "description": "Authentication endpoints for user registration, login, and OTP verification"
+    },
+    {
+      "name": "Password Management",
+      "item": [
+        {
+          "name": "Forgot Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/forgot-password",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "forgot-password"]
+            },
+            "description": "Send OTP to reset password (static OTP: 1234)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Password (with OTP)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"newPassword\": \"NewPassword123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/update-password",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "update-password"]
+            },
+            "description": "Update password after receiving OTP"
+          },
+          "response": []
+        },
+        {
+          "name": "Change Password (Authenticated)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"oldPassword\": \"OldPassword123\",\n  \"newPassword\": \"NewPassword123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/change-password",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "change-password"]
+            },
+            "description": "Change password for authenticated user"
+          },
+          "response": []
+        }
+      ],
+      "description": "Password management endpoints"
+    },
+    {
+      "name": "User Profile",
+      "item": [
+        {
+          "name": "Get All Users",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users?page=1&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number"
+                },
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "description": "Items per page"
+                }
+              ]
+            },
+            "description": "Get paginated list of all active users"
+          },
+          "response": []
+        },
+        {
+          "name": "Get User by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/:id",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", ":id"],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{userId}}",
+                  "description": "User ID"
+                }
+              ]
+            },
+            "description": "Get user details by ID"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Profile",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"Updated Full Name\",\n  \"userName\": \"updated_username\",\n  \"profilePhoto\": \"https://example.com/new-photo.jpg\",\n  \"email\": \"newemail@example.com\",\n  \"password\": \"NewPassword123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/update-profile/:id",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "update-profile", ":id"],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{userId}}",
+                  "description": "User ID (must match authenticated user)"
+                }
+              ]
+            },
+            "description": "Update user profile. User can only update their own profile."
+          },
+          "response": []
+        },
+        {
+          "name": "Update User (Admin)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"Updated Name\",\n  \"userName\": \"new_username\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/update-user/:id",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "update-user", ":id"],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{userId}}",
+                  "description": "User ID"
+                }
+              ]
+            },
+            "description": "Admin endpoint to update any user"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete User",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/:id",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", ":id"],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{userId}}",
+                  "description": "User ID to delete"
+                }
+              ]
+            },
+            "description": "Soft delete user (sets status to INACTIVE)"
+          },
+          "response": []
+        }
+      ],
+      "description": "User profile management endpoints"
+    },
+    {
+      "name": "Approval Management (Super Admin Only)",
+      "item": [
+        {
+          "name": "Get Pending Approvals",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const responseJson = pm.response.json();",
+                  "    console.log('Pending approvals:', responseJson.data?.length || 0);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{superAdminToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/approvals/pending?page=1&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "approvals", "pending"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number"
+                },
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "description": "Items per page"
+                }
+              ]
+            },
+            "description": "Get list of users pending approval. **Super Admin only**"
+          },
+          "response": []
+        },
+        {
+          "name": "Approve User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    console.log('✅ User approved successfully');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{superAdminToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignedRole\": \"ADMIN\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/approvals/:userId/approve",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "approvals", ":userId", "approve"],
+              "variable": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}",
+                  "description": "User ID to approve"
+                }
+              ]
+            },
+            "description": "Approve a pending user and assign role. **Super Admin only**\n\n**Available roles:** ADMIN, OPERATIONS, FINANCE, DRIVER, STAFF\n\n**Note:** Super admin can assign any role, regardless of what the user requested."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    console.log('✅ User rejected');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{superAdminToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rejectionReason\": \"Does not meet requirements\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/approvals/:userId/reject",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "users", "approvals", ":userId", "reject"],
+              "variable": [
+                {
+                  "key": "userId",
+                  "value": "{{userId}}",
+                  "description": "User ID to reject"
+                }
+              ]
+            },
+            "description": "Reject a pending user application. **Super Admin only**"
+          },
+          "response": []
+        }
+      ],
+      "description": "Approval management endpoints for super admin. These endpoints require SUPER_ADMIN role."
+    },
+    {
+      "name": "File Upload",
+      "item": [
+        {
+          "name": "Upload Image (Base64)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"imageBase64\": \"data:image/jpeg;base64,/9j/4AAQSkZJRg...\",\n  \"contentType\": \"image/jpeg\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/upload-image",
+              "host": ["{{baseUrl}}"],
+              "path": ["upload-image"]
+            },
+            "description": "Upload image using base64 encoding"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Image (Multer)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/upload-image-multer",
+              "host": ["{{baseUrl}}"],
+              "path": ["upload-image-multer"]
+            },
+            "description": "Upload image using multipart form data"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Audio (Multer)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "audio",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/upload-audio-multer",
+              "host": ["{{baseUrl}}"],
+              "path": ["upload-audio-multer"]
+            },
+            "description": "Upload audio file (MP3, WAV)"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Media (Base64)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file\": \"data:audio/mpeg;base64,SUQzBAAAAAA...\",\n  \"mediaType\": \"audio\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/upload-media",
+              "host": ["{{baseUrl}}"],
+              "path": ["upload-media"]
+            },
+            "description": "Upload media file (audio/video) using base64"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload File (Base64)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fileBase64\": \"data:application/pdf;base64,JVBERi0xLjQ...\",\n  \"contentType\": \"application/pdf\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/upload-file",
+              "host": ["{{baseUrl}}"],
+              "path": ["upload-file"]
+            },
+            "description": "Upload any file using base64 encoding"
+          },
+          "response": []
+        }
+      ],
+      "description": "File upload endpoints"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "console.log('📋 API Request:', pm.request.method, pm.request.url);",
+          "console.log('🔑 Token:', pm.collectionVariables.get('token') ? '✅ Set' : '❌ Not set');"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (pm.response.code === 200 || pm.response.code === 201) {",
+          "    console.log('✅ Request successful');",
+          "} else if (pm.response.code === 401) {",
+          "    console.log('❌ Authentication failed - check your token');",
+          "} else if (pm.response.code === 403) {",
+          "    console.log('❌ Permission denied - check your role');",
+          "} else {",
+          "    console.log('⚠️ Request failed:', pm.response.code);",
+          "}"
+        ]
+      }
+    }
+  ]
+}
+
