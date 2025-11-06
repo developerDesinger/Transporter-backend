@@ -135,6 +135,56 @@ router.post(
   MasterDataController.createCustomer
 );
 
+router.get(
+  "/customers/:id",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getCustomerById
+);
+
+router.get(
+  "/customers/:id/documents",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getCustomerDocuments
+);
+
+router.get(
+  "/customers/:id/linked-documents",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getCustomerLinkedDocuments
+);
+
+// ==================== OPERATIONS CONTACTS ====================
+router.get(
+  "/customers/:id/operations-contacts",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getOperationsContacts
+);
+
+router.post(
+  "/customers/:id/operations-contacts",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.createOperationsContact
+);
+
+router.patch(
+  "/customers/:id/operations-contacts/:contactId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updateOperationsContact
+);
+
+router.delete(
+  "/customers/:id/operations-contacts/:contactId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteOperationsContact
+);
+
 router.patch(
   "/customers/:id/status",
   requirePermission("master_data.manage"),
@@ -220,6 +270,12 @@ router.get(
   "/fuel-levies/current",
   requirePermission("master_data.view"),
   MasterDataController.getCurrentFuelLevy
+);
+
+router.get(
+  "/fuel-levies/current/all",
+  requirePermission("master_data.view"),
+  MasterDataController.getCurrentFuelLevies
 );
 
 router.post(

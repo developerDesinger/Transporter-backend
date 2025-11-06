@@ -13,6 +13,7 @@ const PartySchema = new mongoose.Schema(
     state: { type: String },
     postcode: { type: String },
     address: { type: String },
+    registeredAddress: { type: String }, // Full registered address
     // Additional fields for drivers
     abn: { type: String },
     stateRegion: { type: String },

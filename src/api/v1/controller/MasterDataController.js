@@ -99,6 +99,49 @@ class MasterDataController {
     return res.status(200).json(result);
   });
 
+  static getCustomerById = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const customer = await MasterDataService.getCustomerById(id);
+    return res.status(200).json(customer);
+  });
+
+  static getCustomerDocuments = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const documents = await MasterDataService.getCustomerDocuments(id);
+    return res.status(200).json(documents);
+  });
+
+  static getCustomerLinkedDocuments = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const linkedDocuments = await MasterDataService.getCustomerLinkedDocuments(id);
+    return res.status(200).json(linkedDocuments);
+  });
+
+  // ==================== OPERATIONS CONTACTS ====================
+  static getOperationsContacts = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const contacts = await MasterDataService.getOperationsContacts(id);
+    return res.status(200).json(contacts);
+  });
+
+  static createOperationsContact = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const contact = await MasterDataService.createOperationsContact(id, req.body);
+    return res.status(201).json(contact);
+  });
+
+  static updateOperationsContact = catchAsyncHandler(async (req, res) => {
+    const { id, contactId } = req.params;
+    const contact = await MasterDataService.updateOperationsContact(id, contactId, req.body);
+    return res.status(200).json(contact);
+  });
+
+  static deleteOperationsContact = catchAsyncHandler(async (req, res) => {
+    const { id, contactId } = req.params;
+    const result = await MasterDataService.deleteOperationsContact(id, contactId);
+    return res.status(200).json(result);
+  });
+
   // ==================== RATE CARDS ====================
   static getAllRateCards = catchAsyncHandler(async (req, res) => {
     const rateCards = await MasterDataService.getAllRateCards(req.query);
@@ -182,8 +225,14 @@ class MasterDataController {
   });
 
   static getCurrentFuelLevy = catchAsyncHandler(async (req, res) => {
-    const levy = await MasterDataService.getCurrentFuelLevy();
+    const { rateType } = req.query;
+    const levy = await MasterDataService.getCurrentFuelLevy(rateType);
     return res.status(200).json(levy);
+  });
+
+  static getCurrentFuelLevies = catchAsyncHandler(async (req, res) => {
+    const levies = await MasterDataService.getCurrentFuelLevies();
+    return res.status(200).json(levies);
   });
 
   static createFuelLevy = catchAsyncHandler(async (req, res) => {

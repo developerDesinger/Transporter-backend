@@ -14,6 +14,9 @@ const DriverInduction = require("../models/driverInduction.model");
 const DriverDocument = require("../models/driverDocument.model");
 const Application = require("../models/application.model");
 const InductionToken = require("../models/inductionToken.model");
+const CustomerDocument = require("../models/customerDocument.model");
+const CustomerLinkedDocument = require("../models/customerLinkedDocument.model");
+const OperationsContact = require("../models/operationsContact.model");
 const User = require("../models/user.model");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
@@ -461,6 +464,288 @@ class MasterDataService {
     };
   }
 
+  static async getCustomerById(customerId) {
+    const customer = await Customer.findById(customerId)
+      .populate("party")
+      .lean();
+
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Format customer response
+    const formattedCustomer = {
+      id: customer._id.toString(),
+      partyId: customer.partyId.toString(),
+      party: customer.party
+        ? {
+            id: customer.party._id.toString(),
+            companyName: customer.party.companyName,
+            email: customer.party.email,
+            phone: customer.party.phone,
+            phoneAlt: customer.party.phoneAlt,
+            contactName: customer.party.contactName,
+            suburb: customer.party.suburb,
+            state: customer.party.state,
+            postcode: customer.party.postcode,
+            address: customer.party.address,
+            registeredAddress: customer.party.registeredAddress,
+            abn: customer.party.abn,
+          }
+        : null,
+      acn: customer.acn,
+      legalCompanyName: customer.legalCompanyName,
+      tradingName: customer.tradingName,
+      websiteUrl: customer.websiteUrl,
+      registeredAddress: customer.registeredAddress,
+      city: customer.city,
+      state: customer.state,
+      postcode: customer.postcode,
+      primaryContactName: customer.primaryContactName,
+      primaryContactPosition: customer.primaryContactPosition,
+      primaryContactEmail: customer.primaryContactEmail,
+      primaryContactPhone: customer.primaryContactPhone,
+      primaryContactMobile: customer.primaryContactMobile,
+      accountsName: customer.accountsName,
+      accountsEmail: customer.accountsEmail,
+      accountsPhone: customer.accountsPhone,
+      accountsMobile: customer.accountsMobile,
+      termsDays: customer.termsDays,
+      defaultFuelLevyPct: customer.defaultFuelLevyPct,
+      invoiceGrouping: customer.invoiceGrouping,
+      invoicePrefix: customer.invoicePrefix,
+      onboardingStatus: customer.onboardingStatus,
+      onboardingSentAt: customer.onboardingSentAt,
+      serviceStates: customer.serviceStates || [],
+      serviceCities: customer.serviceCities || [],
+      serviceTypes: customer.serviceTypes || [],
+      palletsUsed: customer.palletsUsed,
+      chepAccountNumber: customer.chepAccountNumber,
+      loscamAccountNumber: customer.loscamAccountNumber,
+      palletControllerName: customer.palletControllerName,
+      palletControllerEmail: customer.palletControllerEmail,
+      isActive: customer.isActive,
+      createdAt: customer.createdAt,
+      updatedAt: customer.updatedAt,
+    };
+
+    return formattedCustomer;
+  }
+
+  static async getCustomerDocuments(customerId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all documents for this customer
+    const documents = await CustomerDocument.find({ customerId })
+      .populate("uploadedBy", "fullName name")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return documents.map((doc) => ({
+      id: doc._id.toString(),
+      customerId: doc.customerId.toString(),
+      documentType: doc.documentType,
+      title: doc.title,
+      fileName: doc.fileName,
+      fileUrl: doc.fileUrl,
+      fileSize: doc.fileSize,
+      mimeType: doc.mimeType,
+      uploadedBy: doc.uploadedBy ? doc.uploadedBy._id.toString() : null,
+      uploadedByName: doc.uploadedBy
+        ? doc.uploadedBy.fullName || doc.uploadedBy.name || "Unknown"
+        : null,
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+    }));
+  }
+
+  static async getCustomerLinkedDocuments(customerId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all linked documents with template information
+    const linkedDocuments = await CustomerLinkedDocument.find({ customerId })
+      .populate("template")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return linkedDocuments.map((linkedDoc) => ({
+      id: linkedDoc._id.toString(),
+      customerId: linkedDoc.customerId.toString(),
+      templateId: linkedDoc.templateId.toString(),
+      template: linkedDoc.template
+        ? {
+            id: linkedDoc.template._id.toString(),
+            documentKey: linkedDoc.template.documentKey,
+            title: linkedDoc.template.title,
+            category: linkedDoc.template.category,
+            content: linkedDoc.template.content,
+            isActive: linkedDoc.template.isActive,
+          }
+        : null,
+      customizedContent: linkedDoc.customizedContent,
+      status: linkedDoc.status,
+      sentAt: linkedDoc.sentAt,
+      sentTo: linkedDoc.sentTo,
+      createdAt: linkedDoc.createdAt,
+      updatedAt: linkedDoc.updatedAt,
+    }));
+  }
+
+  // ==================== OPERATIONS CONTACTS ====================
+
+  static async getOperationsContacts(customerId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all operations contacts for this customer
+    const contacts = await OperationsContact.find({ customerId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return contacts.map((contact) => ({
+      id: contact._id.toString(),
+      customerId: contact.customerId.toString(),
+      name: contact.name,
+      position: contact.position || null,
+      email: contact.email || null,
+      phone: contact.phone || null,
+      mobile: contact.mobile || null,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    }));
+  }
+
+  static async createOperationsContact(customerId, data) {
+    const { name, position, email, phone, mobile } = data;
+
+    // Validate required fields
+    if (!name || name.trim() === "") {
+      throw new AppError("Name is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate email format if provided
+    if (email && email.trim() !== "") {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email.trim())) {
+        throw new AppError("Invalid email format", HttpStatusCodes.BAD_REQUEST);
+      }
+    }
+
+    // Create contact
+    const contact = await OperationsContact.create({
+      customerId,
+      name: name.trim(),
+      position: position?.trim() || null,
+      email: email?.trim() || null,
+      phone: phone?.trim() || null,
+      mobile: mobile?.trim() || null,
+    });
+
+    return {
+      id: contact._id.toString(),
+      customerId: contact.customerId.toString(),
+      name: contact.name,
+      position: contact.position || null,
+      email: contact.email || null,
+      phone: contact.phone || null,
+      mobile: contact.mobile || null,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    };
+  }
+
+  static async updateOperationsContact(customerId, contactId, data) {
+    const { name, position, email, phone, mobile } = data;
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify contact exists and belongs to customer
+    const contact = await OperationsContact.findOne({
+      _id: contactId,
+      customerId: customerId,
+    });
+
+    if (!contact) {
+      throw new AppError("Contact not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate email format if provided
+    if (email !== undefined && email !== null && email.trim() !== "") {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email.trim())) {
+        throw new AppError("Invalid email format", HttpStatusCodes.BAD_REQUEST);
+      }
+    }
+
+    // Update contact (only provided fields)
+    if (name !== undefined) contact.name = name.trim();
+    if (position !== undefined) contact.position = position?.trim() || null;
+    if (email !== undefined) contact.email = email?.trim() || null;
+    if (phone !== undefined) contact.phone = phone?.trim() || null;
+    if (mobile !== undefined) contact.mobile = mobile?.trim() || null;
+
+    await contact.save();
+
+    return {
+      id: contact._id.toString(),
+      customerId: contact.customerId.toString(),
+      name: contact.name,
+      position: contact.position || null,
+      email: contact.email || null,
+      phone: contact.phone || null,
+      mobile: contact.mobile || null,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    };
+  }
+
+  static async deleteOperationsContact(customerId, contactId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify contact exists and belongs to customer
+    const contact = await OperationsContact.findOne({
+      _id: contactId,
+      customerId: customerId,
+    });
+
+    if (!contact) {
+      throw new AppError("Contact not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Delete contact
+    await OperationsContact.deleteOne({ _id: contactId });
+
+    return {
+      success: true,
+      message: "Contact deleted successfully",
+    };
+  }
+
   static async updateCustomer(customerId, data) {
     const customer = await Customer.findById(customerId).populate("party");
     if (!customer) {
@@ -886,6 +1171,7 @@ class MasterDataService {
 
     return levies.map((levy) => ({
       id: levy._id.toString(),
+      rateType: levy.rateType,
       percentage: levy.percentage,
       effectiveFrom: levy.effectiveFrom,
       effectiveTo: levy.effectiveTo,
@@ -894,12 +1180,18 @@ class MasterDataService {
     }));
   }
 
-  static async getCurrentFuelLevy() {
-    const levy = await FuelLevy.findOne({
+  static async getCurrentFuelLevy(rateType = null) {
+    const filter = {
       isActive: true,
       effectiveFrom: { $lte: new Date() },
       $or: [{ effectiveTo: null }, { effectiveTo: { $gte: new Date() } }],
-    }).sort({ effectiveFrom: -1 });
+    };
+
+    if (rateType) {
+      filter.rateType = rateType;
+    }
+
+    const levy = await FuelLevy.findOne(filter).sort({ effectiveFrom: -1 });
 
     if (!levy) {
       throw new AppError("No active fuel levy found.", HttpStatusCodes.NOT_FOUND);
@@ -907,6 +1199,7 @@ class MasterDataService {
 
     return {
       id: levy._id.toString(),
+      rateType: levy.rateType,
       percentage: levy.percentage,
       effectiveFrom: levy.effectiveFrom,
       effectiveTo: levy.effectiveTo,
@@ -914,11 +1207,53 @@ class MasterDataService {
     };
   }
 
+  static async getCurrentFuelLevies() {
+    // Get current fuel levies for both rate types
+    const hourlyLevy = await FuelLevy.findOne({
+      rateType: "HOURLY",
+      isActive: true,
+      effectiveFrom: { $lte: new Date() },
+      $or: [{ effectiveTo: null }, { effectiveTo: { $gte: new Date() } }],
+    }).sort({ effectiveFrom: -1 });
+
+    const ftlLevy = await FuelLevy.findOne({
+      rateType: "FTL",
+      isActive: true,
+      effectiveFrom: { $lte: new Date() },
+      $or: [{ effectiveTo: null }, { effectiveTo: { $gte: new Date() } }],
+    }).sort({ effectiveFrom: -1 });
+
+    return {
+      hourly: hourlyLevy
+        ? {
+            id: hourlyLevy._id.toString(),
+            rateType: hourlyLevy.rateType,
+            percentage: hourlyLevy.percentage || 0,
+            effectiveFrom: hourlyLevy.effectiveFrom,
+            effectiveTo: hourlyLevy.effectiveTo,
+            isActive: hourlyLevy.isActive,
+          }
+        : null,
+      ftl: ftlLevy
+        ? {
+            id: ftlLevy._id.toString(),
+            rateType: ftlLevy.rateType,
+            percentage: ftlLevy.percentage || 0,
+            effectiveFrom: ftlLevy.effectiveFrom,
+            effectiveTo: ftlLevy.effectiveTo,
+            isActive: ftlLevy.isActive,
+          }
+        : null,
+    };
+  }
+
   static async createFuelLevy(data) {
-    // Deactivate previous active levy
+    const { rateType, effectiveFrom } = data;
+
+    // Deactivate previous active levy for this rateType
     await FuelLevy.updateMany(
-      { isActive: true },
-      { isActive: false, effectiveTo: data.effectiveFrom }
+      { rateType, isActive: true },
+      { isActive: false, effectiveTo: effectiveFrom || new Date() }
     );
 
     const levy = await FuelLevy.create({

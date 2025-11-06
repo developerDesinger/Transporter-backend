@@ -2,6 +2,12 @@ const mongoose = require("mongoose");
 
 const FuelLevySchema = new mongoose.Schema(
   {
+    rateType: {
+      type: String,
+      enum: ["HOURLY", "FTL"],
+      required: true,
+      index: true,
+    },
     percentage: {
       type: Number,
       required: false,
@@ -24,6 +30,9 @@ const FuelLevySchema = new mongoose.Schema(
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
+
+// Compound index for rateType and isActive lookups
+FuelLevySchema.index({ rateType: 1, isActive: 1, effectiveFrom: -1 });
 
 module.exports = mongoose.model("FuelLevy", FuelLevySchema);
 
