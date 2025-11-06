@@ -815,6 +815,56 @@
             "description": "Upload any file using base64 encoding"
           },
           "response": []
+        },
+        {
+          "name": "Upload Image (Any Format) - Server",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "image",
+                  "type": "file",
+                  "src": [],
+                  "description": "Any image format (JPG, PNG, GIF, WEBP, SVG, etc.)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/upload/image",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "upload", "image"]
+            },
+            "description": "Upload any image format. Files are saved to server in uploads/images/ directory.\n\n**Supported formats:** JPG, JPEG, PNG, GIF, WEBP, SVG, BMP, TIFF, and any other image format\n\n**Max file size:** 5MB\n\n**Field name:** image"
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Document (PDF, DOCX, etc.) - Server",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "document",
+                  "type": "file",
+                  "src": [],
+                  "description": "PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, TXT, CSV"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/upload/document",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "upload", "document"]
+            },
+            "description": "Upload document files. Files are saved to server in uploads/documents/ directory.\n\n**Supported formats:**\n- PDF (.pdf)\n- Word (.doc, .docx)\n- Excel (.xls, .xlsx)\n- PowerPoint (.ppt, .pptx)\n- Text (.txt)\n- CSV (.csv)\n\n**Max file size:** 10MB\n\n**Field name:** document"
+          },
+          "response": []
         }
       ],
       "description": "File upload endpoints"

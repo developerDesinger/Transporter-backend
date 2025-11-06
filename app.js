@@ -111,6 +111,8 @@ const storage = multer.diskStorage({
       cb(null, "uploads/images/");
     } else if (file.fieldname === "audio") {
       cb(null, "uploads/audio/");
+    } else if (file.fieldname === "document") {
+      cb(null, "uploads/documents/");
     }
   },
   filename: function (req, file, cb) {
@@ -123,12 +125,57 @@ const storage = multer.diskStorage({
   },
 });
 
-// File filter for images
+// File filter for images (accepts any image format)
 const imageFilter = (req, file, cb) => {
   if (file.mimetype.startsWith("image/")) {
     cb(null, true);
   } else {
     cb(new Error("Only image files are allowed!"), false);
+  }
+};
+
+// File filter for documents (PDF, DOCX, DOC, etc.)
+const documentFilter = (req, file, cb) => {
+  const allowedMimeTypes = [
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
+    "text/plain",
+    "text/csv",
+  ];
+
+  const allowedExtensions = [
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".txt",
+    ".csv",
+  ];
+
+  const fileExtension = file.originalname
+    .toLowerCase()
+    .substring(file.originalname.lastIndexOf("."));
+
+  if (
+    allowedMimeTypes.includes(file.mimetype) ||
+    allowedExtensions.includes(fileExtension)
+  ) {
+    cb(null, true);
+  } else {
+    cb(
+      new Error(
+        `Only document files are allowed! Supported formats: PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, TXT, CSV. Received: ${file.mimetype} (${file.originalname})`
+      ),
+      false
+    );
   }
 };
 
@@ -193,6 +240,15 @@ const uploadAudio = multer({
   fileFilter: audioFilter,
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB limit for audio files
+  },
+});
+
+// Multer instance for document uploads
+const uploadDocument = multer({
+  storage: storage,
+  fileFilter: documentFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit for documents
   },
 });
 
@@ -434,6 +490,140 @@ app.post("/upload-audio-multer", (req, res) => {
       res.status(500).json({
         success: false,
         message: error.message || "Failed to upload audio",
+      });
+    }
+  });
+});
+
+// Image upload API (any image format) - saves to server
+app.post("/api/v1/upload/image", (req, res) => {
+  uploadImage.single("image")(req, res, (err) => {
+    if (err) {
+      console.error("Image upload error:", err);
+
+      // Handle specific multer errors
+      if (err.code === "LIMIT_UNEXPECTED_FILE") {
+        return res.status(400).json({
+          success: false,
+          message: `Unexpected field '${err.field}'. Expected field name: 'image'`,
+        });
+      }
+
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({
+          success: false,
+          message: "File size exceeds the maximum limit of 5MB",
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: err.message || "Failed to upload image",
+      });
+    }
+
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "No image file provided",
+        });
+      }
+
+      const fileUrl = `/uploads/images/${req.file.filename}`;
+      const fullUrl = `${req.protocol}://${req.get("host")}${fileUrl}`;
+
+      res.status(200).json({
+        success: true,
+        message: "Image uploaded successfully",
+        data: {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileUrl: fileUrl,
+          fullUrl: fullUrl,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+          uploadedAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error("Image upload error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to upload image",
+      });
+    }
+  });
+});
+
+// Document upload API (PDF, DOCX, DOC, etc.) - saves to server
+app.post("/api/v1/upload/document", (req, res) => {
+  uploadDocument.single("document")(req, res, (err) => {
+    if (err) {
+      console.error("Document upload error:", err);
+
+      // Handle specific multer errors
+      if (err.code === "LIMIT_UNEXPECTED_FILE") {
+        return res.status(400).json({
+          success: false,
+          message: `Unexpected field '${err.field}'. Expected field name: 'document'`,
+        });
+      }
+
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({
+          success: false,
+          message: "File size exceeds the maximum limit of 10MB",
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: err.message || "Failed to upload document",
+      });
+    }
+
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "No document file provided",
+        });
+      }
+
+      const fileUrl = `/uploads/documents/${req.file.filename}`;
+      const fullUrl = `${req.protocol}://${req.get("host")}${fileUrl}`;
+
+      // Determine file type
+      const fileExtension = req.file.originalname
+        .toLowerCase()
+        .substring(req.file.originalname.lastIndexOf("."));
+      const fileType = fileExtension === ".pdf" ? "PDF" : 
+                      fileExtension === ".docx" || fileExtension === ".doc" ? "Word" :
+                      fileExtension === ".xlsx" || fileExtension === ".xls" ? "Excel" :
+                      fileExtension === ".pptx" || fileExtension === ".ppt" ? "PowerPoint" :
+                      "Document";
+
+      res.status(200).json({
+        success: true,
+        message: "Document uploaded successfully",
+        data: {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          fileUrl: fileUrl,
+          fullUrl: fullUrl,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+          fileType: fileType,
+          fileExtension: fileExtension,
+          uploadedAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error("Document upload error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to upload document",
       });
     }
   });
