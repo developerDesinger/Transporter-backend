@@ -14,6 +14,7 @@ const DriverInduction = require("../models/driverInduction.model");
 const DriverDocument = require("../models/driverDocument.model");
 const Application = require("../models/application.model");
 const InductionToken = require("../models/inductionToken.model");
+const CustomerOnboardingToken = require("../models/customerOnboardingToken.model");
 const CustomerDocument = require("../models/customerDocument.model");
 const CustomerLinkedDocument = require("../models/customerLinkedDocument.model");
 const OperationsContact = require("../models/operationsContact.model");
@@ -25,7 +26,9 @@ const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
 const mongoose = require("mongoose");
 const { uploadFileToS3 } = require("./aws.service");
-const { sendDriverApplicationEmail, sendDriverInductionSubmittedEmail } = require("../utils/email");
+const { sendDriverApplicationEmail, sendDriverInductionSubmittedEmail, sendCustomerOnboardingEmail } = require("../utils/email");
+const path = require("path");
+const fs = require("fs").promises;
 
 class MasterDataService {
   // ==================== DRIVERS ====================
@@ -362,20 +365,67 @@ class MasterDataService {
 
     return customers.map((customer) => ({
       id: customer._id.toString(),
+      partyId: customer.partyId ? customer.partyId.toString() : null,
       party: customer.party
         ? {
             id: customer.party._id.toString(),
             companyName: customer.party.companyName,
             email: customer.party.email,
             phone: customer.party.phone,
+            phoneAlt: customer.party.phoneAlt,
             contactName: customer.party.contactName,
             suburb: customer.party.suburb,
             state: customer.party.state,
             postcode: customer.party.postcode,
+            address: customer.party.address,
+            registeredAddress: customer.party.registeredAddress,
+            abn: customer.party.abn,
           }
         : null,
+      // Company Information
+      acn: customer.acn,
+      legalCompanyName: customer.legalCompanyName,
+      tradingName: customer.tradingName,
+      websiteUrl: customer.websiteUrl,
+      registeredAddress: customer.registeredAddress,
+      city: customer.city,
+      state: customer.state,
+      postcode: customer.postcode,
+      // Primary Contact
+      primaryContactName: customer.primaryContactName,
+      primaryContactPosition: customer.primaryContactPosition,
+      primaryContactEmail: customer.primaryContactEmail,
+      primaryContactPhone: customer.primaryContactPhone,
+      primaryContactMobile: customer.primaryContactMobile,
+      // Accounts Contact
+      accountsName: customer.accountsName,
+      accountsEmail: customer.accountsEmail,
+      accountsPhone: customer.accountsPhone,
+      accountsMobile: customer.accountsMobile,
+      // Billing & Payment
+      termsDays: customer.termsDays,
+      defaultFuelLevyPct: customer.defaultFuelLevyPct,
+      customFuelLevyMetroPct: customer.customFuelLevyMetroPct || null,
+      customFuelLevyInterstatePct: customer.customFuelLevyInterstatePct || null,
+      invoiceGrouping: customer.invoiceGrouping,
+      invoicePrefix: customer.invoicePrefix,
+      // Onboarding
+      onboardingStatus: customer.onboardingStatus,
+      onboardingSentAt: customer.onboardingSentAt,
+      // Service Information
+      serviceStates: customer.serviceStates || [],
+      serviceCities: customer.serviceCities || [],
+      serviceTypes: customer.serviceTypes || [],
+      // Pallet Information
+      palletsUsed: customer.palletsUsed,
+      chepAccountNumber: customer.chepAccountNumber,
+      loscamAccountNumber: customer.loscamAccountNumber,
+      palletControllerName: customer.palletControllerName,
+      palletControllerEmail: customer.palletControllerEmail,
+      // Status
       isActive: customer.isActive,
       createdAt: customer.createdAt,
+      updatedAt: customer.updatedAt,
     }));
   }
 
@@ -513,6 +563,8 @@ class MasterDataService {
       accountsMobile: customer.accountsMobile,
       termsDays: customer.termsDays,
       defaultFuelLevyPct: customer.defaultFuelLevyPct,
+      customFuelLevyMetroPct: customer.customFuelLevyMetroPct || null,
+      customFuelLevyInterstatePct: customer.customFuelLevyInterstatePct || null,
       invoiceGrouping: customer.invoiceGrouping,
       invoicePrefix: customer.invoicePrefix,
       onboardingStatus: customer.onboardingStatus,
@@ -562,6 +614,171 @@ class MasterDataService {
       createdAt: doc.createdAt,
       updatedAt: doc.updatedAt,
     }));
+  }
+
+  static async uploadCustomerDocument(customerId, file, data, userId) {
+    const { documentType, title } = data;
+
+    // Validate required fields
+    if (!file) {
+      throw new AppError("File is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!documentType) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Document type is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const validDocumentTypes = ["APPLICATION_PDF", "CONTRACT", "INSURANCE", "OTHER"];
+    if (!validDocumentTypes.includes(documentType)) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError(
+        `Invalid document type. Must be one of: ${validDocumentTypes.join(", ")}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    if (!title || !title.trim()) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Title is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get user name for uploadedBy
+    const user = await User.findById(userId).select("fullName name");
+    const uploadedByName = user
+      ? user.fullName || user.name || "Unknown"
+      : "Unknown";
+
+    // Create document record
+    const document = await CustomerDocument.create({
+      customerId: customerId,
+      documentType: documentType,
+      title: title.trim(),
+      fileName: file.originalname,
+      fileUrl: `/uploads/customers/${customerId}/${file.filename}`,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+      uploadedBy: userId,
+    });
+
+    return {
+      id: document._id.toString(),
+      customerId: document.customerId.toString(),
+      documentType: document.documentType,
+      title: document.title,
+      fileName: document.fileName,
+      fileUrl: document.fileUrl,
+      fileSize: document.fileSize,
+      mimeType: document.mimeType,
+      uploadedBy: document.uploadedBy.toString(),
+      uploadedByName: uploadedByName,
+      createdAt: document.createdAt,
+      updatedAt: document.updatedAt,
+    };
+  }
+
+  static async deleteCustomerDocument(customerId, documentId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Find document
+    const document = await CustomerDocument.findOne({
+      _id: documentId,
+      customerId: customerId,
+    });
+
+    if (!document) {
+      throw new AppError("Document not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Delete physical file
+    const filePath = path.join(
+      process.env.UPLOAD_DIR || "./uploads",
+      document.fileUrl
+    );
+
+    try {
+      await fs.unlink(filePath);
+    } catch (fileError) {
+      console.error("Error deleting file:", fileError);
+      // Continue with database deletion even if file deletion fails
+    }
+
+    // Delete document record
+    await CustomerDocument.deleteOne({ _id: documentId });
+
+    return {
+      success: true,
+      message: "Document deleted successfully",
+    };
+  }
+
+  static async downloadCustomerDocument(customerId, documentId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Find document
+    const document = await CustomerDocument.findOne({
+      _id: documentId,
+      customerId: customerId,
+    });
+
+    if (!document) {
+      throw new AppError("Document not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Construct file path
+    const filePath = path.join(
+      process.env.UPLOAD_DIR || "./uploads",
+      document.fileUrl
+    );
+
+    // Check if file exists
+    try {
+      await fs.access(filePath);
+    } catch (error) {
+      throw new AppError("File not found on server", HttpStatusCodes.NOT_FOUND);
+    }
+
+    return {
+      filePath: filePath,
+      fileName: document.fileName,
+      mimeType: document.mimeType,
+      fileSize: document.fileSize,
+    };
   }
 
   static async getCustomerLinkedDocuments(customerId) {
@@ -896,6 +1113,429 @@ class MasterDataService {
     return {
       success: true,
       message: "Contact deleted successfully",
+    };
+  }
+
+  // ==================== CUSTOMER FUEL LEVY ====================
+
+  static async updateCustomerFuelLevy(customerId, data) {
+    const { metroPct, interstatePct } = data;
+
+    // Validate required fields
+    if (!metroPct || !interstatePct) {
+      throw new AppError("metroPct and interstatePct are required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Validate percentage format and range
+    const metroValue = parseFloat(metroPct);
+    const interstateValue = parseFloat(interstatePct);
+
+    if (isNaN(metroValue) || isNaN(interstateValue)) {
+      throw new AppError("Percentages must be valid numbers", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (metroValue < 0 || metroValue > 100 || interstateValue < 0 || interstateValue > 100) {
+      throw new AppError("Percentages must be between 0 and 100", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Update customer fuel levy (format to 2 decimal places)
+    customer.customFuelLevyMetroPct = parseFloat(metroPct).toFixed(2);
+    customer.customFuelLevyInterstatePct = parseFloat(interstatePct).toFixed(2);
+    await customer.save();
+
+    return {
+      id: customer._id.toString(),
+      customFuelLevyMetroPct: customer.customFuelLevyMetroPct,
+      customFuelLevyInterstatePct: customer.customFuelLevyInterstatePct,
+      updatedAt: customer.updatedAt,
+    };
+  }
+
+  // ==================== CUSTOMER HOURLY RATES ====================
+
+  static async getCustomerHourlyRates(customerId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all hourly rates for this customer
+    const rates = await RateCard.find({
+      customerId: customerId,
+      rateType: "HOURLY",
+    })
+      .sort({ serviceCode: 1, vehicleType: 1 })
+      .lean();
+
+    return rates.map((rate) => ({
+      id: rate._id.toString(),
+      customerId: rate.customerId ? rate.customerId.toString() : null,
+      serviceCode: rate.serviceCode,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1, // Default version if not in model
+      effectiveFrom: rate.effectiveFrom,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
+    }));
+  }
+
+  static async createCustomerHourlyRate(customerId, data) {
+    const { serviceCode, vehicleType, rateExGst, description } = data;
+
+    // Validate required fields
+    if (!vehicleType || !rateExGst) {
+      throw new AppError(
+        "Vehicle Type and Rate Ex GST are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate rateExGst
+    const rateValue = parseFloat(rateExGst);
+    if (isNaN(rateValue) || rateValue < 0) {
+      throw new AppError("Invalid rate value", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check for duplicate rate (same serviceCode + vehicleType for this customer)
+    const existingRate = await RateCard.findOne({
+      customerId: customerId,
+      rateType: "HOURLY",
+      serviceCode: serviceCode || null,
+      vehicleType: vehicleType.trim(),
+    });
+
+    if (existingRate) {
+      throw new AppError(
+        "A rate with this service code and vehicle type already exists",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create new rate
+    const rate = await RateCard.create({
+      customerId: customerId,
+      rateType: "HOURLY",
+      serviceCode: serviceCode?.trim() || null,
+      vehicleType: vehicleType.trim(),
+      rateExGst: parseFloat(rateExGst),
+      description: description?.trim() || null,
+      effectiveFrom: new Date(),
+      isLocked: false,
+    });
+
+    return {
+      id: rate._id.toString(),
+      customerId: rate.customerId ? rate.customerId.toString() : null,
+      serviceCode: rate.serviceCode,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1,
+      effectiveFrom: rate.effectiveFrom,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
+    };
+  }
+
+  static async updateCustomerHourlyRate(customerId, rateId, data) {
+    const { serviceCode, vehicleType, rateExGst } = data;
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify rate exists and belongs to customer
+    const rate = await RateCard.findOne({
+      _id: rateId,
+      customerId: customerId,
+      rateType: "HOURLY",
+    });
+
+    if (!rate) {
+      throw new AppError("Rate not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if rate is locked
+    if (rate.isLocked) {
+      throw new AppError(
+        "Rate is locked and cannot be updated",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Validate rateExGst if provided
+    if (rateExGst !== undefined) {
+      const rateValue = parseFloat(rateExGst);
+      if (isNaN(rateValue) || rateValue < 0) {
+        throw new AppError("Invalid rate value", HttpStatusCodes.BAD_REQUEST);
+      }
+    }
+
+    // Update rate (only provided fields)
+    if (serviceCode !== undefined) rate.serviceCode = serviceCode.trim();
+    if (vehicleType !== undefined) rate.vehicleType = vehicleType.trim();
+    if (rateExGst !== undefined) rate.rateExGst = parseFloat(rateExGst);
+
+    await rate.save();
+
+    return {
+      id: rate._id.toString(),
+      customerId: rate.customerId ? rate.customerId.toString() : null,
+      serviceCode: rate.serviceCode,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1,
+      effectiveFrom: rate.effectiveFrom,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
+    };
+  }
+
+  static async deleteCustomerHourlyRate(customerId, rateId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify rate exists and belongs to customer
+    const rate = await RateCard.findOne({
+      _id: rateId,
+      customerId: customerId,
+      rateType: "HOURLY",
+    });
+
+    if (!rate) {
+      throw new AppError("Rate not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if rate is locked
+    if (rate.isLocked) {
+      throw new AppError(
+        "Rate is locked and cannot be deleted",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Delete rate
+    await RateCard.deleteOne({ _id: rateId });
+
+    return {
+      success: true,
+      message: "Hourly rate deleted successfully",
+    };
+  }
+
+  // ==================== CUSTOMER FTL RATES ====================
+
+  static async getCustomerFtlRates(customerId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all FTL rates for this customer
+    const rates = await RateCard.find({
+      customerId: customerId,
+      rateType: "FTL",
+    })
+      .sort({ laneKey: 1, vehicleType: 1 })
+      .lean();
+
+    return rates.map((rate) => ({
+      id: rate._id.toString(),
+      customerId: rate.customerId ? rate.customerId.toString() : null,
+      laneKey: rate.laneKey,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1, // Default version if not in model
+      effectiveFrom: rate.effectiveFrom,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
+    }));
+  }
+
+  static async createCustomerFtlRate(customerId, data) {
+    const { laneKey, vehicleType, rateExGst, description } = data;
+
+    // Validate required fields
+    if (!laneKey || !vehicleType || !rateExGst) {
+      throw new AppError(
+        "Vehicle Type, Rate Ex GST, and Lane Key are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate laneKey format
+    if (!laneKey.includes("-")) {
+      throw new AppError(
+        "Lane Key must be in format ORIGIN-DESTINATION (e.g., SYD-MEL)",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate rateExGst
+    const rateValue = parseFloat(rateExGst);
+    if (isNaN(rateValue) || rateValue < 0) {
+      throw new AppError("Invalid rate value", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check for duplicate rate (same laneKey + vehicleType for this customer)
+    const existingRate = await RateCard.findOne({
+      customerId: customerId,
+      rateType: "FTL",
+      laneKey: laneKey.trim(),
+      vehicleType: vehicleType.trim(),
+    });
+
+    if (existingRate) {
+      throw new AppError(
+        "A rate with this lane key and vehicle type already exists",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create new rate
+    const rate = await RateCard.create({
+      customerId: customerId,
+      rateType: "FTL",
+      laneKey: laneKey.trim(),
+      vehicleType: vehicleType.trim(),
+      rateExGst: parseFloat(rateExGst),
+      description: description?.trim() || null,
+      effectiveFrom: new Date(),
+      isLocked: false,
+    });
+
+    return {
+      id: rate._id.toString(),
+      customerId: rate.customerId ? rate.customerId.toString() : null,
+      laneKey: rate.laneKey,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1,
+      effectiveFrom: rate.effectiveFrom,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
+    };
+  }
+
+  // ==================== CUSTOMER ONBOARDING ====================
+
+  static async sendCustomerOnboarding(customerId, data) {
+    const { companyName, email } = data;
+
+    // Validate required fields
+    if (!companyName || !email) {
+      throw new AppError(
+        "Company Name and Email are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      throw new AppError(
+        "Invalid email address format",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId).populate("party");
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Generate secure token for onboarding link
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+    // Create or update onboarding token record
+    await CustomerOnboardingToken.findOneAndUpdate(
+      { customerId: customerId, email: email.toLowerCase().trim() },
+      {
+        customerId: customerId,
+        email: email.toLowerCase().trim(),
+        token: token,
+        expiresAt: expiresAt,
+        used: false,
+        usedAt: null,
+      },
+      { upsert: true, new: true }
+    );
+
+    // Generate onboarding link
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const onboardingLink = `${frontendUrl}/onboarding?token=${token}&customerId=${customerId}`;
+
+    // Update customer record
+    customer.onboardingStatus = "SENT";
+    customer.onboardingSentAt = new Date();
+    // Optionally update primary contact email if different
+    if (email !== customer.primaryContactEmail) {
+      customer.primaryContactEmail = email;
+    }
+    await customer.save();
+
+    // Send email notification
+    try {
+      await sendCustomerOnboardingEmail({
+        to: email,
+        companyName: companyName,
+        onboardingLink: onboardingLink,
+        customerId: customerId,
+      });
+    } catch (emailError) {
+      console.error("Error sending customer onboarding email:", emailError);
+      // Rollback customer status update
+      customer.onboardingStatus = "DRAFT";
+      customer.onboardingSentAt = null;
+      await customer.save();
+      throw new AppError(
+        "Failed to send onboarding email. Please try again later.",
+        HttpStatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+
+    return {
+      success: true,
+      message: "Onboarding link sent successfully",
+      email: email,
+      sentAt: new Date().toISOString(),
     };
   }
 
@@ -1249,17 +1889,45 @@ class MasterDataService {
       customerId: null,
       rateType: "HOURLY",
     })
-      .sort({ createdAt: -1 })
+      .sort({ serviceCode: 1, vehicleType: 1 })
       .lean();
 
     return rates.map((rate) => ({
       id: rate._id.toString(),
+      customerId: null, // Always null for house rates
       serviceCode: rate.serviceCode,
       vehicleType: rate.vehicleType,
-      rateExGst: rate.rateExGst,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1, // Default version if not in model
       effectiveFrom: rate.effectiveFrom,
-      description: rate.description,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
       createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
+    }));
+  }
+
+  // ==================== FTL HOUSE RATES ====================
+  static async getFtlHouseRates() {
+    const rates = await RateCard.find({
+      customerId: null,
+      rateType: "FTL",
+    })
+      .sort({ laneKey: 1, vehicleType: 1 })
+      .lean();
+
+    return rates.map((rate) => ({
+      id: rate._id.toString(),
+      customerId: null, // Always null for house rates
+      laneKey: rate.laneKey,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
+      version: 1, // Default version if not in model
+      effectiveFrom: rate.effectiveFrom,
+      description: rate.description || null,
+      isLocked: rate.isLocked || false,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
     }));
   }
 

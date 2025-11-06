@@ -104,6 +104,22 @@ app.use((req, res, next) => {
 app.use(compression());
 app.use(cookieParser());
 
+// Disable ETag globally to prevent 304 responses for API endpoints
+// ETags can cause browsers to cache API responses incorrectly
+app.set("etag", false);
+
+// Add no-cache headers for all API routes to prevent browser caching
+app.use("/api", (req, res, next) => {
+  res.set({
+    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+    "Pragma": "no-cache",
+    "Expires": "0",
+  });
+  // Remove ETag header if Express still adds it
+  res.removeHeader("ETag");
+  next();
+});
+
 // Multer configuration for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {

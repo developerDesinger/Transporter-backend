@@ -31,6 +31,8 @@ const CustomerSchema = new mongoose.Schema(
     // Billing & Payment
     termsDays: { type: Number, default: 30 },
     defaultFuelLevyPct: { type: String },
+    customFuelLevyMetroPct: { type: String, default: null }, // Custom fuel levy for Metro/Hourly rates
+    customFuelLevyInterstatePct: { type: String, default: null }, // Custom fuel levy for Interstate/FTL rates
     invoiceGrouping: {
       type: String,
       enum: ["DAY", "WEEK", "MONTH"],

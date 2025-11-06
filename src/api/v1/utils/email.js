@@ -217,6 +217,69 @@ const sendDriverInductionSubmittedEmail = async (options) => {
   }
 };
 
-module.exports = { sendEmail, sendForgotPasswordEmail, sendDriverApplicationEmail, sendDriverInductionSubmittedEmail };
+const sendCustomerOnboardingEmail = async (options) => {
+  // Validate recipient email
+  if (!options.email) {
+    console.error("❌ Error: Recipient email is missing.");
+    return;
+  }
+
+  // Validate onboarding link
+  if (!options.onboardingLink) {
+    console.error("❌ Error: Onboarding link is missing.");
+    return;
+  }
+
+  // Customer Onboarding Email Template
+  const htmlTemplate = `  
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <img src="https://booking-bot-frontend.vercel.app/images/Group%201410088281.png" alt="Transporter.Digital Logo" style="max-width: 150px;">
+  </div>
+  <div style="background-color: #ffffff; padding: 20px;">
+    <h2 style="color: #333; margin-bottom: 20px;">Welcome to Transporter Digital</h2>
+    <p>Dear ${options.companyName || "Valued Customer"},</p>
+    <p>Thank you for choosing our services. To complete your onboarding process, please click the link below:</p>
+    <p style="text-align: center; margin: 30px 0;">
+      <a href="${options.onboardingLink}" style="background-color: #007bff; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Complete Onboarding Application</a>
+    </p>
+    <p><strong>This link will expire in 7 days.</strong></p>
+    <p>If you did not request this link, please ignore this email.</p>
+  </div>
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <p>For any assistance, contact us at <a href="mailto:support@transporter.digital" style="color: #007bff; text-decoration: none;">support@transporter.digital</a>.</p>
+    <p>Best regards,<br/>The Transporter.Digital Team</p>
+  </div>
+</div>
+`;
+
+  // Email options
+  const mailOptions = {
+    to: options.email,
+    from: process.env.FROM_EMAIL || "tericalomnick@gmail.com", // Use FROM_EMAIL from env or fallback
+    subject: options.subject || `Complete Your Onboarding Application - ${options.companyName || "Transporter Digital"}`,
+    html: htmlTemplate,
+  };
+
+  try {
+    await sgMail.send(mailOptions);
+    console.log(`✅ Customer onboarding email sent successfully to: ${options.email}`);
+    return { success: true };
+  } catch (error) {
+    console.error(
+      "❌ Error sending customer onboarding email:",
+      error.response ? error.response.body : error
+    );
+    throw error;
+  }
+};
+
+module.exports = { 
+  sendEmail, 
+  sendForgotPasswordEmail, 
+  sendDriverApplicationEmail, 
+  sendDriverInductionSubmittedEmail,
+  sendCustomerOnboardingEmail 
+};
 
 // module.exports = sendEmail;

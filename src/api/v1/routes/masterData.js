@@ -1,5 +1,7 @@
 const express = require("express");
 const multer = require("multer");
+const path = require("path");
+const fs = require("fs").promises;
 const MasterDataController = require("../controller/MasterDataController");
 const { isAuthenticated } = require("../middlewares/auth.middleware");
 const { requirePermission } = require("../middlewares/permission.middleware");
@@ -44,6 +46,65 @@ const upload = multer({
       cb(
         new Error(
           "Only PDF, JPG, JPEG, and PNG files are allowed for document uploads"
+        ),
+        false
+      );
+    }
+  },
+});
+
+// Configure multer for customer document uploads (disk storage)
+const customerDocumentStorage = multer.diskStorage({
+  destination: async (req, file, cb) => {
+    const customerId = req.params.id;
+    const uploadDir = path.join(
+      process.env.UPLOAD_DIR || "./uploads",
+      "customers",
+      customerId
+    );
+
+    // Create directory if it doesn't exist
+    try {
+      await fs.mkdir(uploadDir, { recursive: true });
+    } catch (error) {
+      console.error("Error creating upload directory:", error);
+    }
+
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: originalname_timestamp.extension
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${name}_${uniqueSuffix}${ext}`);
+  },
+});
+
+const customerDocumentUpload = multer({
+  storage: customerDocumentStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow PDF, images, and common document types
+    const allowedMimes = [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ];
+
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Only PDF, images, and document files are allowed."
         ),
         false
       );
@@ -149,6 +210,46 @@ router.get(
   MasterDataController.getCustomerDocuments
 );
 
+router.post(
+  "/customers/:id/documents",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  (req, res, next) => {
+    customerDocumentUpload.single("file")(req, res, (err) => {
+      if (err) {
+        // Handle multer errors
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({
+            message: "File size exceeds maximum allowed size of 10MB",
+          });
+        }
+        if (err.message) {
+          return res.status(400).json({ message: err.message });
+        }
+        return res.status(400).json({
+          message: "File upload error",
+        });
+      }
+      next();
+    });
+  },
+  MasterDataController.uploadCustomerDocument
+);
+
+router.delete(
+  "/customers/:id/documents/:documentId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteCustomerDocument
+);
+
+router.get(
+  "/customers/:id/documents/:docId/download",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.downloadCustomerDocument
+);
+
 router.get(
   "/customers/:id/linked-documents",
   isAuthenticated,
@@ -212,6 +313,65 @@ router.delete(
   isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.deleteBillingContact
+);
+
+router.patch(
+  "/customers/:id/fuel-levy",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updateCustomerFuelLevy
+);
+
+// ==================== CUSTOMER HOURLY RATES ====================
+router.get(
+  "/customers/:id/hourly-rates",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getCustomerHourlyRates
+);
+
+router.post(
+  "/customers/:id/hourly-rates",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.createCustomerHourlyRate
+);
+
+router.patch(
+  "/customers/:id/hourly-rates/:rateId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updateCustomerHourlyRate
+);
+
+router.delete(
+  "/customers/:id/hourly-rates/:rateId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteCustomerHourlyRate
+);
+
+// ==================== CUSTOMER FTL RATES ====================
+router.get(
+  "/customers/:id/ftl-rates",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getCustomerFtlRates
+);
+
+router.post(
+  "/customers/:id/ftl-rates",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.createCustomerFtlRate
+);
+
+// ==================== CUSTOMER ONBOARDING ====================
+router.post(
+  "/customers/:id/send-onboarding",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.sendCustomerOnboarding
 );
 
 router.patch(
@@ -429,6 +589,7 @@ router.get(
 // ==================== HOURLY HOUSE RATES ====================
 router.get(
   "/hourly-house-rates",
+  isAuthenticated,
   requirePermission("master_data.view"),
   MasterDataController.getAllHourlyHouseRates
 );
@@ -443,6 +604,14 @@ router.delete(
   "/hourly-house-rates/:id",
   requirePermission("master_data.manage"),
   MasterDataController.deleteHourlyHouseRate
+);
+
+// ==================== FTL HOUSE RATES ====================
+router.get(
+  "/ftl-house-rates",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getFtlHouseRates
 );
 
 // ==================== INDUCTIONS (Driver Portal) ====================

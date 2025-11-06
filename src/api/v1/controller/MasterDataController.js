@@ -111,6 +111,68 @@ class MasterDataController {
     return res.status(200).json(documents);
   });
 
+  static uploadCustomerDocument = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const file = req.file;
+    const { documentType, title } = req.body;
+    const userId = req.user._id;
+
+    try {
+      const document = await MasterDataService.uploadCustomerDocument(
+        id,
+        file,
+        { documentType, title },
+        userId
+      );
+      return res.status(201).json(document);
+    } catch (error) {
+      // Clean up uploaded file on error
+      if (file && file.path) {
+        const fs = require("fs").promises;
+        try {
+          await fs.unlink(file.path);
+        } catch (cleanupError) {
+          // Ignore cleanup errors
+        }
+      }
+      throw error;
+    }
+  });
+
+  static deleteCustomerDocument = catchAsyncHandler(async (req, res) => {
+    const { id, documentId } = req.params;
+    const result = await MasterDataService.deleteCustomerDocument(id, documentId);
+    return res.status(200).json(result);
+  });
+
+  static downloadCustomerDocument = catchAsyncHandler(async (req, res) => {
+    const { id, docId } = req.params;
+    const fileInfo = await MasterDataService.downloadCustomerDocument(id, docId);
+
+    // Set headers
+    res.setHeader("Content-Type", fileInfo.mimeType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${fileInfo.fileName}"`
+    );
+    res.setHeader("Content-Length", fileInfo.fileSize);
+
+    // Stream file to response
+    const fs = require("fs");
+    const fileStream = fs.createReadStream(fileInfo.filePath);
+
+    fileStream.pipe(res);
+
+    fileStream.on("error", (error) => {
+      console.error("Error streaming file:", error);
+      if (!res.headersSent) {
+        return res.status(500).json({
+          message: "Failed to download document",
+        });
+      }
+    });
+  });
+
   static getCustomerLinkedDocuments = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
     const linkedDocuments = await MasterDataService.getCustomerLinkedDocuments(id);
@@ -164,6 +226,58 @@ class MasterDataController {
   static deleteBillingContact = catchAsyncHandler(async (req, res) => {
     const { id, contactId } = req.params;
     const result = await MasterDataService.deleteBillingContact(id, contactId);
+    return res.status(200).json(result);
+  });
+
+  // ==================== CUSTOMER FUEL LEVY ====================
+  static updateCustomerFuelLevy = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.updateCustomerFuelLevy(id, req.body);
+    return res.status(200).json(result);
+  });
+
+  // ==================== CUSTOMER HOURLY RATES ====================
+  static getCustomerHourlyRates = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const rates = await MasterDataService.getCustomerHourlyRates(id);
+    return res.status(200).json(rates);
+  });
+
+  static createCustomerHourlyRate = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const rate = await MasterDataService.createCustomerHourlyRate(id, req.body);
+    return res.status(201).json(rate);
+  });
+
+  static updateCustomerHourlyRate = catchAsyncHandler(async (req, res) => {
+    const { id, rateId } = req.params;
+    const rate = await MasterDataService.updateCustomerHourlyRate(id, rateId, req.body);
+    return res.status(200).json(rate);
+  });
+
+  static deleteCustomerHourlyRate = catchAsyncHandler(async (req, res) => {
+    const { id, rateId } = req.params;
+    const result = await MasterDataService.deleteCustomerHourlyRate(id, rateId);
+    return res.status(200).json(result);
+  });
+
+  // ==================== CUSTOMER FTL RATES ====================
+  static getCustomerFtlRates = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const rates = await MasterDataService.getCustomerFtlRates(id);
+    return res.status(200).json(rates);
+  });
+
+  static createCustomerFtlRate = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const rate = await MasterDataService.createCustomerFtlRate(id, req.body);
+    return res.status(201).json(rate);
+  });
+
+  // ==================== CUSTOMER ONBOARDING ====================
+  static sendCustomerOnboarding = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.sendCustomerOnboarding(id, req.body);
     return res.status(200).json(result);
   });
 
@@ -451,6 +565,12 @@ class MasterDataController {
     const { id } = req.params;
     const result = await MasterDataService.deleteHourlyHouseRate(id);
     return res.status(200).json(result);
+  });
+
+  // ==================== FTL HOUSE RATES ====================
+  static getFtlHouseRates = catchAsyncHandler(async (req, res) => {
+    const rates = await MasterDataService.getFtlHouseRates();
+    return res.status(200).json(rates);
   });
 }
 
