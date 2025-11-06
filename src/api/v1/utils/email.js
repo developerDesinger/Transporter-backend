@@ -274,12 +274,181 @@ const sendCustomerOnboardingEmail = async (options) => {
   }
 };
 
+const sendLinkedDocumentEmail = async (options) => {
+  // Validate recipient email
+  if (!options.email && !options.to) {
+    console.error("❌ Error: Recipient email is missing.");
+    return;
+  }
+
+  const recipientEmail = options.email || options.to;
+
+  // Validate document content
+  if (!options.content) {
+    console.error("❌ Error: Document content is missing.");
+    return;
+  }
+
+  // Linked Document Email Template
+  const htmlTemplate = `  
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <img src="https://booking-bot-frontend.vercel.app/images/Group%201410088281.png" alt="Transporter.Digital Logo" style="max-width: 150px;">
+  </div>
+  <div style="background-color: #ffffff; padding: 20px;">
+    <h2 style="color: #333; margin-bottom: 20px;">${options.documentName || "Document"}</h2>
+    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; white-space: pre-wrap;">
+      ${options.content}
+    </div>
+    <p>Please review the document above. If you have any questions, please contact us.</p>
+  </div>
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <p>For any assistance, contact us at <a href="mailto:support@transporter.digital" style="color: #007bff; text-decoration: none;">support@transporter.digital</a>.</p>
+    <p>Best regards,<br/>The Transporter.Digital Team</p>
+  </div>
+</div>
+`;
+
+  // Email options
+  const mailOptions = {
+    to: recipientEmail,
+    from: process.env.FROM_EMAIL || "tericalomnick@gmail.com",
+    subject: options.subject || options.documentName || "Document from Transporter Digital",
+    html: htmlTemplate,
+  };
+
+  try {
+    await sgMail.send(mailOptions);
+    console.log(`✅ Linked document email sent successfully to: ${recipientEmail}`);
+    return { success: true };
+  } catch (error) {
+    console.error(
+      "❌ Error sending linked document email:",
+      error.response ? error.response.body : error
+    );
+    throw error;
+  }
+};
+
+const sendRCTIEmail = async (options) => {
+  // Validate recipient email
+  if (!options.email && !options.to) {
+    console.error("❌ Error: Recipient email is missing.");
+    return;
+  }
+
+  const recipientEmail = options.email || options.to;
+
+  // Validate required fields
+  if (!options.rctiNumber || !options.driverName) {
+    console.error("❌ Error: RCTI number or driver name is missing.");
+    return;
+  }
+
+  // Format dates
+  const formatDate = (date) => {
+    if (!date) return "N/A";
+    const d = new Date(date);
+    return d.toLocaleDateString("en-AU", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  };
+
+  // Format currency
+  const formatCurrency = (amount) => {
+    if (!amount) return "$0.00";
+    const num = parseFloat(amount);
+    return `$${num.toFixed(2)}`;
+  };
+
+  // Calculate GST amount (GST is 10% of total, so 1/11 of total)
+  const calculateGST = (totalAmount) => {
+    const total = parseFloat(totalAmount) || 0;
+    return (total / 11).toFixed(2);
+  };
+
+  // Calculate amount excluding GST
+  const calculateExGST = (totalAmount) => {
+    const total = parseFloat(totalAmount) || 0;
+    return (total * 10 / 11).toFixed(2);
+  };
+
+  const gstAmount = calculateGST(options.totalAmount);
+  const amountExGst = calculateExGST(options.totalAmount);
+
+  // RCTI Email Template
+  const htmlTemplate = `  
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <img src="https://booking-bot-frontend.vercel.app/images/Group%201410088281.png" alt="Transporter.Digital Logo" style="max-width: 150px;">
+  </div>
+  <div style="background-color: #ffffff; padding: 20px;">
+    <h2 style="color: #333; margin-bottom: 20px;">Recipient Created Tax Invoice (RCTI)</h2>
+    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
+      <p><strong>RCTI Number:</strong> ${options.rctiNumber}</p>
+      <p><strong>Pay Run Number:</strong> ${options.payRunNumber || "N/A"}</p>
+      <p><strong>Driver Name:</strong> ${options.driverName}</p>
+      <p><strong>Period:</strong> ${formatDate(options.periodStart)} - ${formatDate(options.periodEnd)}</p>
+      <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+      <p><strong>Total Amount (Including GST):</strong> ${formatCurrency(options.totalAmount)}</p>
+      <p><strong>Amount Excluding GST:</strong> ${formatCurrency(amountExGst)}</p>
+      <p><strong>GST Amount:</strong> ${formatCurrency(gstAmount)}</p>
+    </div>
+    <p style="color: #666; font-size: 14px;">
+      This RCTI has been created in accordance with Australian Taxation Office requirements.
+      ${options.attachment ? "Please find the detailed RCTI document attached." : ""}
+    </p>
+  </div>
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <p>For any questions about this RCTI, please contact us at <a href="mailto:support@transporter.digital" style="color: #007bff; text-decoration: none;">support@transporter.digital</a>.</p>
+    <p>Best regards,<br/>The Transporter.Digital Team</p>
+  </div>
+</div>
+`;
+
+  // Email options
+  const mailOptions = {
+    to: recipientEmail,
+    from: process.env.FROM_EMAIL || "tericalomnick@gmail.com",
+    subject: `RCTI ${options.rctiNumber} - ${options.payRunNumber || "Tax Invoice"}`,
+    html: htmlTemplate,
+  };
+
+  // Add attachment if provided
+  if (options.attachment && options.attachmentName) {
+    mailOptions.attachments = [
+      {
+        content: options.attachment.toString("base64"),
+        filename: options.attachmentName,
+        type: "application/pdf",
+        disposition: "attachment",
+      },
+    ];
+  }
+
+  try {
+    await sgMail.send(mailOptions);
+    console.log(`✅ RCTI email sent successfully to: ${recipientEmail}`);
+    return { success: true };
+  } catch (error) {
+    console.error(
+      "❌ Error sending RCTI email:",
+      error.response ? error.response.body : error
+    );
+    throw error;
+  }
+};
+
 module.exports = { 
   sendEmail, 
   sendForgotPasswordEmail, 
   sendDriverApplicationEmail, 
   sendDriverInductionSubmittedEmail,
-  sendCustomerOnboardingEmail 
+  sendCustomerOnboardingEmail,
+  sendLinkedDocumentEmail,
+  sendRCTIEmail
 };
 
 // module.exports = sendEmail;

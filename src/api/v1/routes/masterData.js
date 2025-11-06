@@ -4,7 +4,7 @@ const path = require("path");
 const fs = require("fs").promises;
 const MasterDataController = require("../controller/MasterDataController");
 const { isAuthenticated } = require("../middlewares/auth.middleware");
-const { requirePermission } = require("../middlewares/permission.middleware");
+const { requirePermission, requireAnyPermission } = require("../middlewares/permission.middleware");
 
 const router = express.Router();
 
@@ -112,30 +112,157 @@ const customerDocumentUpload = multer({
   },
 });
 
+// Configure multer for generic file uploads (disk storage)
+const genericUploadStorage = multer.diskStorage({
+  destination: async (req, file, cb) => {
+    // Determine upload directory based on context (default: drivers)
+    const context = req.body.context || "drivers";
+    const uploadDir = path.join(
+      process.env.UPLOAD_DIR || "./uploads",
+      context
+    );
+
+    // Create directory if it doesn't exist
+    try {
+      await fs.mkdir(uploadDir, { recursive: true });
+    } catch (error) {
+      console.error("Error creating upload directory:", error);
+    }
+
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: originalname_timestamp.extension
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${name}_${uniqueSuffix}${ext}`);
+  },
+});
+
+const genericUpload = multer({
+  storage: genericUploadStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow PDF, images, and common document types
+    const allowedMimes = [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ];
+
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Only PDF, images, and document files are allowed."
+        ),
+        false
+      );
+    }
+  },
+});
+
+// Configure multer for driver document uploads (disk storage)
+const driverDocumentStorage = multer.diskStorage({
+  destination: async (req, file, cb) => {
+    const driverId = req.body.driverId || "temp";
+    const uploadDir = path.join(
+      process.env.UPLOAD_DIR || "./uploads",
+      "drivers",
+      driverId
+    );
+
+    // Create directory if it doesn't exist
+    try {
+      await fs.mkdir(uploadDir, { recursive: true });
+    } catch (error) {
+      console.error("Error creating upload directory:", error);
+    }
+
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: originalname_timestamp.extension
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${name}_${uniqueSuffix}${ext}`);
+  },
+});
+
+const driverDocumentUpload = multer({
+  storage: driverDocumentStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow PDF, images, and common document types
+    const allowedMimes = [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ];
+
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Only PDF, images, and document files are allowed."
+        ),
+        false
+      );
+    }
+  },
+});
+
 // Most master data routes require authentication and permission
 // Exceptions: public routes (like driver induction) are defined before this middleware
 
 // ==================== DRIVERS ====================
 router.get(
   "/drivers",
+  isAuthenticated,
   requirePermission("master_data.view"),
   MasterDataController.getAllDrivers
 );
 
+router.get(
+  "/drivers/:id",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getDriverById
+);
+
 router.post(
   "/drivers",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.createDriver
 );
 
 router.patch(
   "/drivers/:id/status",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.toggleDriverStatus
 );
 
 router.patch(
   "/drivers/:id",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.updateDriver
 );
@@ -143,44 +270,109 @@ router.patch(
 // ==================== DRIVER RATES ====================
 router.get(
   "/drivers/:id/rates",
+  isAuthenticated,
   requirePermission("master_data.view"),
   MasterDataController.getDriverRates
 );
 
 router.post(
   "/drivers/:id/rates",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.createDriverRate
 );
 
 router.patch(
   "/drivers/:id/rates/:rateId",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.updateDriverRate
 );
 
 router.delete(
   "/drivers/:id/rates/:rateId",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.deleteDriverRate
 );
 
+// ==================== DRIVER LINKED DOCUMENTS ====================
+router.get(
+  "/drivers/:id/linked-documents",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getDriverLinkedDocuments
+);
+
+router.post(
+  "/drivers/:id/linked-documents",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.linkDocumentTemplateToDriver
+);
+
+router.patch(
+  "/linked-documents/:docId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updateLinkedDocument
+);
+
+router.delete(
+  "/linked-documents/:docId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteLinkedDocument
+);
+
+router.post(
+  "/linked-documents/:docId/send",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.sendLinkedDocument
+);
+
+
 router.post(
   "/drivers/:id/rates/lock",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.lockDriverRates
 );
 
 router.post(
   "/drivers/:id/rates/unlock",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.unlockDriverRates
 );
 
 router.post(
   "/drivers/:id/rates/apply-cpi-increase",
+  isAuthenticated,
   requirePermission("master_data.manage"),
   MasterDataController.applyCPIToDriverRates
+);
+
+router.post(
+  "/drivers/:id/copy-hourly-house-rates",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.copyHourlyHouseRates
+);
+
+router.post(
+  "/drivers/:id/copy-ftl-house-rates",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.copyFtlHouseRates
+);
+
+router.patch(
+  "/drivers/:id/fuel-levy",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updateDriverFuelLevy
 );
 
 // ==================== CUSTOMERS ====================
@@ -631,6 +823,21 @@ router.post(
   "/drivers/:id/inductions",
   isAuthenticated,
   MasterDataController.completeDriverInduction
+);
+
+// ==================== RCTI LOGS ====================
+router.get(
+  "/rcti-logs",
+  isAuthenticated,
+  requireAnyPermission("drivers.view", "master_data.view"),
+  MasterDataController.getRCTILogs
+);
+
+router.post(
+  "/payruns/:payRunId/send-rctis",
+  isAuthenticated,
+  requireAnyPermission("drivers.manage", "master_data.manage"),
+  MasterDataController.sendRCTIs
 );
 
 // All master data routes require authentication and permission

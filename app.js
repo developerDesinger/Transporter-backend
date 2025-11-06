@@ -282,6 +282,182 @@ app.use("/api/v1", organizationRoutes);
 app.use("/api/v1", masterDataRoutes);
 // app.use("/api/v1/cron", cronRoutes);
 
+// Import controllers and middleware for upload routes
+const MasterDataController = require("./src/api/v1/controller/MasterDataController");
+const catchAsyncHandler = require("./src/api/v1/utils/catchAsyncHandler");
+const { isAuthenticated } = require("./src/api/v1/middlewares/auth.middleware");
+const fs = require("fs").promises;
+
+// Configure multer for generic file uploads
+const genericUploadStorage = multer.diskStorage({
+  destination: async (req, file, cb) => {
+    // Determine upload directory based on context (default: drivers)
+    const context = req.body.context || "drivers";
+    const uploadDir = path.join(
+      process.env.UPLOAD_DIR || "./uploads",
+      context
+    );
+
+    // Create directory if it doesn't exist
+    try {
+      await fs.mkdir(uploadDir, { recursive: true });
+    } catch (error) {
+      console.error("Error creating upload directory:", error);
+    }
+
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename: originalname_timestamp.extension
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${name}_${uniqueSuffix}${ext}`);
+  },
+});
+
+const genericUploadMulter = multer({
+  storage: genericUploadStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow PDF, images, and common document types
+    const allowedMimes = [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ];
+
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Only PDF, images, and document files are allowed."
+        ),
+        false
+      );
+    }
+  },
+});
+
+// Generic file upload endpoint
+app.post(
+  "/api/upload",
+  isAuthenticated,
+  (req, res, next) => {
+    genericUploadMulter.single("file")(req, res, (err) => {
+      if (err) {
+        // Handle multer errors
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({
+            message: "File size exceeds maximum allowed size of 10MB",
+          });
+        }
+        if (err.message) {
+          return res.status(400).json({ message: err.message });
+        }
+        return res.status(400).json({
+          message: "File upload error",
+        });
+      }
+      next();
+    });
+  },
+  MasterDataController.uploadFile
+);
+
+// Public driver document update endpoint (optional auth - can use secure token from URL)
+app.patch(
+  "/api/public/users/:driverId/documents",
+  MasterDataController.updateDriverDocument
+);
+
+// Driver upload endpoint (with policy type)
+app.post(
+  "/api/driver-uploads",
+  isAuthenticated,
+  (req, res, next) => {
+    // Use the same driver document upload multer config
+    const driverDocumentStorage = multer.diskStorage({
+      destination: async (req, file, cb) => {
+        const driverId = req.body.driverId || "temp";
+        const uploadDir = path.join(
+          process.env.UPLOAD_DIR || "./uploads",
+          "drivers",
+          driverId
+        );
+
+        try {
+          await fs.mkdir(uploadDir, { recursive: true });
+        } catch (error) {
+          console.error("Error creating upload directory:", error);
+        }
+
+        cb(null, uploadDir);
+      },
+      filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+        const ext = path.extname(file.originalname);
+        const name = path.basename(file.originalname, ext);
+        cb(null, `${name}_${uniqueSuffix}${ext}`);
+      },
+    });
+
+    const driverDocumentUpload = multer({
+      storage: driverDocumentStorage,
+      limits: {
+        fileSize: 10 * 1024 * 1024, // 10MB limit
+      },
+      fileFilter: (req, file, cb) => {
+        const allowedMimes = [
+          "application/pdf",
+          "image/jpeg",
+          "image/png",
+          "image/gif",
+          "application/msword",
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ];
+
+        if (allowedMimes.includes(file.mimetype)) {
+          cb(null, true);
+        } else {
+          cb(
+            new Error(
+              "Invalid file type. Only PDF, images, and document files are allowed."
+            ),
+            false
+          );
+        }
+      },
+    });
+
+    driverDocumentUpload.single("file")(req, res, (err) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({
+            message: "File size exceeds maximum allowed size of 10MB",
+          });
+        }
+        if (err.message) {
+          return res.status(400).json({ message: err.message });
+        }
+        return res.status(400).json({
+          message: "File upload error",
+        });
+      }
+      next();
+    });
+  },
+  MasterDataController.uploadDriverDocument
+);
+
 app.post("/upload-image", async (req, res) => {
   try {
     const { imageBase64, contentType } = req.body;

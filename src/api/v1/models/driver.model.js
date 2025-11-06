@@ -23,10 +23,16 @@ const DriverSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true, index: true },
     // Compliance expiry dates
     licenseExpiry: { type: Date },
+    licenseDocumentFront: { type: String, default: null },
+    licenseDocumentBack: { type: String, default: null },
     motorInsuranceExpiry: { type: Date },
+    motorInsuranceDocument: { type: String, default: null },
     publicLiabilityExpiry: { type: Date },
+    publicLiabilityDocument: { type: String, default: null },
     marineCargoExpiry: { type: Date },
+    marineCargoInsuranceDocument: { type: String, default: null },
     workersCompExpiry: { type: Date },
+    workersCompDocument: { type: String, default: null },
     // Driver Portal fields
     abn: { type: String },
     bankName: { type: String },
@@ -39,6 +45,9 @@ const DriverSchema = new mongoose.Schema(
     vehicleTypesInFleet: [{ type: String }],
     fleetSize: { type: String },
     gstRegistered: { type: Boolean, default: false },
+    rctiAgreementAccepted: { type: Boolean, default: false }, // RCTI agreement acceptance
+    // Driver fuel levy percentage
+    driverFuelLevyPct: { type: String, default: null },
     // Insurance policy numbers
     motorInsurancePolicyNumber: { type: String },
     marineCargoInsurancePolicyNumber: { type: String },

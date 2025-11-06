@@ -96,9 +96,9 @@ class UserService {
       // User exists but is inactive or pending
       if (isAdminCreation) {
         // Admin can reactivate existing users
-        user.fullName = fullName;
-        user.profilePhoto = profilePhoto;
-        user.requestedRole = role || "STAFF";
+      user.fullName = fullName;
+      user.profilePhoto = profilePhoto;
+      user.requestedRole = role || "STAFF";
         user.role = role || "STAFF";
         user.status = "ACTIVE";
         user.approvalStatus = "APPROVED";
@@ -112,12 +112,12 @@ class UserService {
         user.profilePhoto = profilePhoto;
         user.requestedRole = role || "STAFF";
         user.status = "PENDING_VERIFICATION";
-        user.approvalStatus = "PENDING";
-        user.otp = otp;
-        user.otpCreatedAt = new Date();
+      user.approvalStatus = "PENDING";
+      user.otp = otp;
+      user.otpCreatedAt = new Date();
         user.isSuperAdmin = false;
         if (finalPassword) user.password = await bcrypt.hash(finalPassword, 10);
-        await user.save();
+      await user.save();
       }
     } else {
       // Create new user
@@ -308,13 +308,13 @@ class UserService {
 
     // Format user with RBAC data
     const formattedUser = await formatUserWithRBAC(user);
-    
+
     const token = createJwtToken({ id: user.id, role: user.role });
     return {
       message: "Login successful.",
       success: true,
       data: {
-        token,
+      token,
         user: formattedUser,
       },
       user: formattedUser, // Keep for backward compatibility
@@ -369,13 +369,13 @@ class UserService {
 
     // Format user with RBAC data
     const formattedUser = await formatUserWithRBAC(user);
-    
+
     const token = createJwtToken({ id: user.id, role: user.role });
     return {
       message: "Social login successful.",
       success: true,
       data: {
-        token,
+      token,
         user: formattedUser,
       },
       user: formattedUser, // Keep for backward compatibility

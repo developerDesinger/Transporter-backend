@@ -17,6 +17,7 @@ const InductionToken = require("../models/inductionToken.model");
 const CustomerOnboardingToken = require("../models/customerOnboardingToken.model");
 const CustomerDocument = require("../models/customerDocument.model");
 const CustomerLinkedDocument = require("../models/customerLinkedDocument.model");
+const DriverLinkedDocument = require("../models/driverLinkedDocument.model");
 const OperationsContact = require("../models/operationsContact.model");
 const BillingContact = require("../models/billingContact.model");
 const User = require("../models/user.model");
@@ -26,7 +27,7 @@ const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
 const mongoose = require("mongoose");
 const { uploadFileToS3 } = require("./aws.service");
-const { sendDriverApplicationEmail, sendDriverInductionSubmittedEmail, sendCustomerOnboardingEmail } = require("../utils/email");
+const { sendDriverApplicationEmail, sendDriverInductionSubmittedEmail, sendCustomerOnboardingEmail, sendLinkedDocumentEmail } = require("../utils/email");
 const path = require("path");
 const fs = require("fs").promises;
 
@@ -75,19 +76,175 @@ class MasterDataService {
     }));
   }
 
+  static async getDriverById(driverId) {
+    const driver = await Driver.findById(driverId).populate("party");
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get driver documents to find document URLs (fallback to DriverDocument if not in driver model)
+    const documents = await DriverDocument.find({ driverId }).lean();
+    const documentMap = {};
+    documents.forEach((doc) => {
+      if (doc.documentType === "LICENSE_FRONT") {
+        documentMap.licenseDocumentFront = doc.fileUrl;
+      } else if (doc.documentType === "LICENSE_BACK") {
+        documentMap.licenseDocumentBack = doc.fileUrl;
+      } else if (doc.documentType === "MOTOR_INSURANCE") {
+        documentMap.motorInsuranceDocument = doc.fileUrl;
+      } else if (doc.documentType === "PUBLIC_LIABILITY") {
+        documentMap.publicLiabilityDocument = doc.fileUrl;
+      } else if (doc.documentType === "MARINE_CARGO_INSURANCE") {
+        documentMap.marineCargoInsuranceDocument = doc.fileUrl;
+      } else if (doc.documentType === "WORKERS_COMP") {
+        documentMap.workersCompDocument = doc.fileUrl;
+      }
+    });
+
+    // Use driver model fields first, fallback to DriverDocument
+    if (driver.licenseDocumentFront) {
+      documentMap.licenseDocumentFront = driver.licenseDocumentFront;
+    }
+    if (driver.licenseDocumentBack) {
+      documentMap.licenseDocumentBack = driver.licenseDocumentBack;
+    }
+    if (driver.motorInsuranceDocument) {
+      documentMap.motorInsuranceDocument = driver.motorInsuranceDocument;
+    }
+    if (driver.publicLiabilityDocument) {
+      documentMap.publicLiabilityDocument = driver.publicLiabilityDocument;
+    }
+    if (driver.marineCargoInsuranceDocument) {
+      documentMap.marineCargoInsuranceDocument = driver.marineCargoInsuranceDocument;
+    }
+    if (driver.workersCompDocument) {
+      documentMap.workersCompDocument = driver.workersCompDocument;
+    }
+
+    // Format bank details
+    const bankDetails =
+      driver.bankName || driver.accountName || driver.bsb || driver.accountNumber
+        ? {
+            bankName: driver.bankName || null,
+            accountName: driver.accountName || null,
+            bsb: driver.bsb || null,
+            accountNumber: driver.accountNumber || null,
+          }
+        : null;
+
+    return {
+      id: driver._id.toString(),
+      partyId: driver.partyId ? driver.partyId.toString() : null,
+      party: driver.party
+        ? {
+            id: driver.party._id.toString(),
+            firstName: driver.party.firstName,
+            lastName: driver.party.lastName,
+            email: driver.party.email,
+            phone: driver.party.phone,
+            companyName: driver.party.companyName,
+            abn: driver.party.abn,
+            suburb: driver.party.suburb,
+            state: driver.party.state,
+            postcode: driver.party.postcode,
+            city: driver.party.suburb, // Using suburb as city
+            status: driver.isActive ? "active" : "inactive",
+          }
+        : null,
+      employmentType: driver.employmentType,
+      contactType: driver.contactType,
+      driverNumber: driver.driverCode,
+      isActive: driver.isActive,
+      complianceStatus: driver.complianceStatus,
+      inductionStatus: "COMPLETED", // TODO: Calculate from DriverInduction records
+      defaultVehicleType: driver.vehicleTypesInFleet?.[0] || null,
+      payMethod: "BOTH", // TODO: Determine from rates
+      baseHourlyRate: null, // TODO: Get from rates
+      baseFtlRate: null, // TODO: Get from rates
+      minHours: null,
+      payTermsDays: null,
+      gstRegistered: driver.gstRegistered,
+      rctiAgreementAccepted: false, // TODO: Add to model if needed
+      driverFuelLevyPct: driver.driverFuelLevyPct || null,
+      licenseExpiry: driver.licenseExpiry,
+      licenseDocumentFront: documentMap.licenseDocumentFront || null,
+      licenseDocumentBack: documentMap.licenseDocumentBack || null,
+      motorInsurancePolicyNumber: driver.motorInsurancePolicyNumber,
+      motorInsuranceDocument: documentMap.motorInsuranceDocument || null,
+      motorInsuranceExpiry: driver.motorInsuranceExpiry,
+      publicLiabilityPolicyNumber: driver.publicLiabilityPolicyNumber,
+      publicLiabilityDocument: documentMap.publicLiabilityDocument || null,
+      publicLiabilityExpiry: driver.publicLiabilityExpiry,
+      marineCargoInsurancePolicyNumber: driver.marineCargoInsurancePolicyNumber,
+      marineCargoInsuranceDocument: documentMap.marineCargoInsuranceDocument || null,
+      marineCargoInsuranceExpiry: driver.marineCargoExpiry,
+      workersCompPolicyNumber: driver.workersCompPolicyNumber,
+      workersCompDocument: documentMap.workersCompDocument || null,
+      workersCompExpiry: driver.workersCompExpiry,
+      bankDetails: bankDetails,
+      fleetOwnerId: null, // TODO: Add to model if needed
+      createdAt: driver.createdAt,
+      updatedAt: driver.updatedAt,
+    };
+  }
+
   static async createDriver(data) {
+    // Validate required fields
+    if (!data.party || !data.party.firstName || !data.party.lastName) {
+      throw new AppError(
+        "First name and last name are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    if (!data.fullName) {
+      throw new AppError("Full name is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Validate email format if provided
+    if (data.party.email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(data.party.email)) {
+        throw new AppError("Invalid email format", HttpStatusCodes.BAD_REQUEST);
+      }
+    }
+
+    // Check for duplicate email
+    if (data.party.email) {
+      const existingParty = await Party.findOne({
+        email: data.party.email.toLowerCase().trim(),
+      });
+      if (existingParty) {
+        const existingDriver = await Driver.findOne({ partyId: existingParty._id });
+        if (existingDriver) {
+          throw new AppError(
+            "Driver with this email already exists",
+            HttpStatusCodes.CONFLICT
+          );
+        }
+      }
+    }
+
     // Create or find party
-    let party = await Party.findOne({ email: data.party.email });
+    let party = await Party.findOne({
+      email: data.party.email?.toLowerCase().trim(),
+    });
     if (!party) {
-      party = await Party.create(data.party);
+      party = await Party.create({
+        ...data.party,
+        email: data.party.email?.toLowerCase().trim(),
+      });
     } else {
       // Update party data
       Object.assign(party, data.party);
+      if (data.party.email) {
+        party.email = data.party.email.toLowerCase().trim();
+      }
       await party.save();
     }
 
     // Generate driver code if not provided
-    let driverCode = data.driverCode;
+    let driverCode = data.driverNumber || data.driverCode;
     if (!driverCode) {
       const count = await Driver.countDocuments();
       driverCode = `DRV${String(count + 1).padStart(4, "0")}`;
@@ -98,33 +255,71 @@ class MasterDataService {
     if (existing) {
       throw new AppError(
         "Driver code already exists.",
-        HttpStatusCodes.BAD_REQUEST
+        HttpStatusCodes.CONFLICT
       );
     }
 
-    const driver = await Driver.create({
+    // Prepare driver data
+    const driverData = {
       partyId: party._id,
-      driverCode,
+      driverCode: driverCode.toUpperCase(),
       employmentType: data.employmentType || "CONTRACTOR",
       isActive: data.isActive !== undefined ? data.isActive : true,
-      licenseExpiry: data.licenseExpiry,
-      motorInsuranceExpiry: data.motorInsuranceExpiry,
-      publicLiabilityExpiry: data.publicLiabilityExpiry,
-      marineCargoExpiry: data.marineCargoExpiry,
-      workersCompExpiry: data.workersCompExpiry,
-      ...data,
+      contactType: data.contactType,
+      abn: data.party?.abn || data.abn,
+      bankName: data.bankDetails?.bankName || data.bankName,
+      accountName: data.bankDetails?.accountName || data.accountName,
+      bsb: data.bankDetails?.bsb || data.bsb,
+      accountNumber: data.bankDetails?.accountNumber || data.accountNumber,
+      servicesProvided: data.servicesProvided,
+      vehicleTypesInFleet: data.vehicleTypesInFleet,
+      fleetSize: data.fleetSize,
+      gstRegistered: data.gstRegistered || false,
+      driverFuelLevyPct: data.driverFuelLevyPct || null,
+      motorInsurancePolicyNumber: data.motorInsurancePolicyNumber,
+      marineCargoInsurancePolicyNumber: data.marineCargoInsurancePolicyNumber,
+      publicLiabilityPolicyNumber: data.publicLiabilityPolicyNumber,
+      workersCompPolicyNumber: data.workersCompPolicyNumber,
+    };
+
+    // Handle date fields
+    const dateFields = [
+      "licenseExpiry",
+      "motorInsuranceExpiry",
+      "publicLiabilityExpiry",
+      "marineCargoExpiry",
+      "workersCompExpiry",
+    ];
+    dateFields.forEach((field) => {
+      if (data[field]) {
+        const dateValue = new Date(data[field]);
+        driverData[field] = isNaN(dateValue.getTime()) ? null : dateValue;
+      }
     });
+
+    // Handle document URL fields
+    const documentFields = [
+      "licenseDocumentFront",
+      "licenseDocumentBack",
+      "motorInsuranceDocument",
+      "publicLiabilityDocument",
+      "marineCargoInsuranceDocument",
+      "workersCompDocument",
+    ];
+    documentFields.forEach((field) => {
+      if (data[field] !== undefined) {
+        driverData[field] = data[field] || null;
+      }
+    });
+
+    const driver = await Driver.create(driverData);
 
     const populated = await Driver.findById(driver._id).populate("party");
 
     return {
       success: true,
       message: "Driver created successfully",
-      driver: {
-        id: populated._id.toString(),
-        party: populated.party,
-        ...populated.toObject(),
-      },
+      user: await this.getDriverById(driver._id.toString()),
     };
   }
 
@@ -154,71 +349,670 @@ class MasterDataService {
       throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    // Update party if provided
-    if (data.party && driver.party) {
-      Object.assign(driver.party, data.party);
+    // Handle fullName recalculation if firstName or lastName is updated
+    if (data.firstName || data.lastName) {
+      const firstName = data.firstName ?? driver.party?.firstName ?? "";
+      const lastName = data.lastName ?? driver.party?.lastName ?? "";
+      data.fullName = `${firstName} ${lastName}`.trim() || "Unknown";
+    }
+
+    // Handle date fields - convert strings to Date objects or null
+    const dateFields = [
+      "licenseExpiry",
+      "motorInsuranceExpiry",
+      "publicLiabilityExpiry",
+      "marineCargoExpiry",
+      "workersCompExpiry",
+    ];
+
+    dateFields.forEach((field) => {
+      if (field in data) {
+        const value = data[field];
+        if (!value || value === "") {
+          data[field] = null;
+        } else if (typeof value === "string") {
+          const dateObj = new Date(value);
+          data[field] = isNaN(dateObj.getTime()) ? null : dateObj;
+        }
+      }
+    });
+
+    // Handle document URL fields - convert empty strings to null
+    const documentFields = [
+      "licenseDocumentFront",
+      "licenseDocumentBack",
+      "motorInsuranceDocument",
+      "publicLiabilityDocument",
+      "marineCargoInsuranceDocument",
+      "workersCompDocument",
+    ];
+    documentFields.forEach((field) => {
+      if (field in data) {
+        const value = data[field];
+        if (!value || value === "") {
+          data[field] = null;
+        }
+      }
+    });
+
+    // Separate party fields from driver fields
+    const partyFields = [
+      "firstName",
+      "lastName",
+      "email",
+      "phone",
+      "companyName",
+      "abn",
+      "suburb",
+      "state",
+      "postcode",
+      "city",
+      "fullName",
+    ];
+    const partyUpdateData = {};
+    const driverUpdateData = {};
+
+    Object.keys(data).forEach((key) => {
+      if (partyFields.includes(key)) {
+        partyUpdateData[key] = data[key];
+      } else if (key === "bankDetails") {
+        // Handle bank details object
+        if (data.bankDetails) {
+          driverUpdateData.bankName = data.bankDetails.bankName;
+          driverUpdateData.accountName = data.bankDetails.accountName;
+          driverUpdateData.bsb = data.bankDetails.bsb;
+          driverUpdateData.accountNumber = data.bankDetails.accountNumber;
+        }
+      } else if (key !== "party") {
+        driverUpdateData[key] = data[key];
+      }
+    });
+
+    // Update party if party fields are provided
+    if (Object.keys(partyUpdateData).length > 0 && driver.party) {
+      if (partyUpdateData.email) {
+        partyUpdateData.email = partyUpdateData.email.toLowerCase().trim();
+      }
+      Object.assign(driver.party, partyUpdateData);
       await driver.party.save();
     }
 
-    // Update driver fields
-    const driverFields = { ...data };
-    delete driverFields.party;
+    // Update driver
+    if (Object.keys(driverUpdateData).length > 0) {
+      Object.assign(driver, driverUpdateData);
+      await driver.save();
+    }
 
-    Object.assign(driver, driverFields);
-    await driver.save();
-
-    const populated = await Driver.findById(driver._id).populate("party");
-
-    return {
-      success: true,
-      message: "Driver updated successfully",
-      driver: {
-        id: populated._id.toString(),
-        party: populated.party,
-        ...populated.toObject(),
-      },
-    };
+    return await this.getDriverById(driverId);
   }
 
   // ==================== DRIVER RATES ====================
 
   static async getDriverRates(driverId) {
-    const rates = await DriverRate.find({ driverId })
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get only current rates (effectiveTo is null)
+    const rates = await DriverRate.find({
+      driverId,
+      effectiveTo: null, // Only get current rates
+    })
       .sort({ createdAt: -1 })
       .lean();
 
     return rates.map((rate) => ({
       id: rate._id.toString(),
       driverId: rate.driverId.toString(),
-      serviceCode: rate.serviceCode,
+      serviceCode: rate.serviceCode || rate.laneKey || null, // For FTL, use laneKey as serviceCode
       vehicleType: rate.vehicleType,
-      payPerHour: rate.payPerHour,
+      payPerHour: rate.payPerHour ? rate.payPerHour.toString() : null,
+      payFtl: rate.flatRate ? rate.flatRate.toString() : null,
       rateType: rate.rateType,
-      laneKey: rate.laneKey,
-      flatRate: rate.flatRate,
-      isLocked: rate.isLocked,
+      laneKey: rate.laneKey || null,
+      lockedAt: rate.lockedAt ? rate.lockedAt.toISOString() : null,
+      effectiveFrom: rate.effectiveFrom ? rate.effectiveFrom.toISOString() : rate.createdAt.toISOString(),
+      effectiveTo: rate.effectiveTo ? rate.effectiveTo.toISOString() : null,
       createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
     }));
   }
 
-  static async createDriverRate(driverId, data) {
+  // ==================== DRIVER LINKED DOCUMENTS ====================
+
+  static async getDriverLinkedDocuments(driverId) {
+    // Verify driver exists
     const driver = await Driver.findById(driverId);
     if (!driver) {
       throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    const rate = await DriverRate.create({
-      driverId,
-      ...data,
+    // Get all linked documents with template information
+    const linkedDocuments = await DriverLinkedDocument.find({ driverId })
+      .populate("template")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return linkedDocuments.map((linkedDoc) => ({
+      id: linkedDoc._id.toString(),
+      driverId: linkedDoc.driverId.toString(),
+      templateId: linkedDoc.templateId.toString(),
+      template: linkedDoc.template
+        ? {
+            id: linkedDoc.template._id.toString(),
+            documentKey: linkedDoc.template.documentKey,
+            title: linkedDoc.template.title,
+            category: linkedDoc.template.category,
+            content: linkedDoc.template.content,
+            isActive: linkedDoc.template.isActive,
+          }
+        : null,
+      customizedContent: linkedDoc.customizedContent,
+      status: linkedDoc.status,
+      sentAt: linkedDoc.sentAt,
+      sentTo: linkedDoc.sentTo,
+      createdAt: linkedDoc.createdAt,
+      updatedAt: linkedDoc.updatedAt,
+    }));
+  }
+
+  static async linkDocumentTemplateToDriver(driverId, data) {
+    const { templateId } = data;
+
+    // Validate templateId
+    if (!templateId) {
+      throw new AppError("Template ID is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify template exists
+    const template = await DocumentTemplate.findById(templateId);
+    if (!template) {
+      throw new AppError("Template not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if template is already linked
+    const existingLink = await DriverLinkedDocument.findOne({
+      driverId: driverId,
+      templateId: templateId,
     });
+
+    if (existingLink) {
+      throw new AppError(
+        "This template is already linked to this driver",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create linked document
+    const linkedDocument = await DriverLinkedDocument.create({
+      driverId: driverId,
+      templateId: templateId,
+      status: "DRAFT",
+    });
+
+    // Fetch with template details
+    const linkedDocWithTemplate = await DriverLinkedDocument.findById(
+      linkedDocument._id
+    )
+      .populate("template")
+      .lean();
+
+    return {
+      id: linkedDocWithTemplate._id.toString(),
+      driverId: linkedDocWithTemplate.driverId.toString(),
+      templateId: linkedDocWithTemplate.templateId.toString(),
+      template: linkedDocWithTemplate.template
+        ? {
+            id: linkedDocWithTemplate.template._id.toString(),
+            documentKey: linkedDocWithTemplate.template.documentKey,
+            title: linkedDocWithTemplate.template.title,
+            category: linkedDocWithTemplate.template.category,
+            content: linkedDocWithTemplate.template.content,
+            isActive: linkedDocWithTemplate.template.isActive,
+          }
+        : null,
+      customizedContent: linkedDocWithTemplate.customizedContent,
+      status: linkedDocWithTemplate.status,
+      sentAt: linkedDocWithTemplate.sentAt,
+      sentTo: linkedDocWithTemplate.sentTo,
+      createdAt: linkedDocWithTemplate.createdAt,
+      updatedAt: linkedDocWithTemplate.updatedAt,
+    };
+  }
+
+  static async updateLinkedDocument(docId, data) {
+    const { customizedContent } = data;
+
+    // Try to find in driver linked documents first
+    let linkedDoc = await DriverLinkedDocument.findById(docId).populate(
+      "template"
+    );
+    let isDriverDoc = true;
+
+    // If not found, try customer linked documents
+    if (!linkedDoc) {
+      linkedDoc = await CustomerLinkedDocument.findById(docId).populate(
+        "template"
+      );
+      isDriverDoc = false;
+    }
+
+    if (!linkedDoc) {
+      throw new AppError(
+        "Linked document not found.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Update linked document
+    if (customizedContent !== undefined) {
+      linkedDoc.customizedContent = customizedContent;
+    }
+    await linkedDoc.save();
+
+    return {
+      id: linkedDoc._id.toString(),
+      driverId: isDriverDoc ? linkedDoc.driverId?.toString() : null,
+      customerId: !isDriverDoc ? linkedDoc.customerId?.toString() : null,
+      templateId: linkedDoc.templateId.toString(),
+      customizedContent: linkedDoc.customizedContent,
+      status: linkedDoc.status,
+      updatedAt: linkedDoc.updatedAt,
+    };
+  }
+
+  static async deleteLinkedDocument(docId) {
+    // Try to find in driver linked documents first
+    let linkedDoc = await DriverLinkedDocument.findById(docId);
+
+    // If not found, try customer linked documents
+    if (!linkedDoc) {
+      linkedDoc = await CustomerLinkedDocument.findById(docId);
+    }
+
+    if (!linkedDoc) {
+      throw new AppError(
+        "Linked document not found.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Delete linked document (works for both models)
+    if (linkedDoc.driverId) {
+      await DriverLinkedDocument.deleteOne({ _id: docId });
+    } else {
+      await CustomerLinkedDocument.deleteOne({ _id: docId });
+    }
 
     return {
       success: true,
-      message: "Driver rate created successfully",
-      rate: {
-        id: rate._id.toString(),
-        ...rate.toObject(),
+      message: "Linked document deleted successfully",
+    };
+  }
+
+  // ==================== DRIVER DOCUMENT UPLOAD ====================
+
+  static async uploadFile(file, context = "drivers") {
+    if (!file) {
+      throw new AppError("File is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // File is already uploaded by multer diskStorage
+    // Convert absolute path to relative path
+    let fileUrl = file.path;
+    if (file.path.startsWith(process.cwd())) {
+      fileUrl = file.path.replace(process.cwd(), "");
+    }
+    // Ensure it starts with /uploads
+    if (!fileUrl.startsWith("/uploads")) {
+      const uploadsIndex = fileUrl.indexOf("uploads");
+      if (uploadsIndex !== -1) {
+        fileUrl = "/" + fileUrl.substring(uploadsIndex);
+      } else {
+        fileUrl = `/uploads/${context}/${file.filename}`;
+      }
+    }
+
+    return {
+      url: fileUrl,
+      fileName: file.originalname,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+    };
+  }
+
+  static async updateDriverDocument(driverId, data) {
+    const { expiryField, documentField, expiryDate, documentUrl } = data;
+
+    // Validate required fields
+    if (!expiryField || !documentField || !expiryDate || !documentUrl) {
+      throw new AppError("All fields are required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Validate date format
+    const expiryDateObj = new Date(expiryDate);
+    if (isNaN(expiryDateObj.getTime())) {
+      throw new AppError("Invalid expiry date format", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate field names (security check)
+    const validExpiryFields = [
+      "licenseExpiry",
+      "motorInsuranceExpiry",
+      "publicLiabilityExpiry",
+      "marineCargoExpiry",
+      "workersCompExpiry",
+    ];
+    const validDocumentFields = [
+      "licenseDocumentFront",
+      "licenseDocumentBack",
+      "motorInsuranceDocument",
+      "publicLiabilityDocument",
+      "marineCargoInsuranceDocument",
+      "workersCompDocument",
+    ];
+
+    if (!validExpiryFields.includes(expiryField)) {
+      throw new AppError("Invalid expiry field name", HttpStatusCodes.BAD_REQUEST);
+    }
+    if (!validDocumentFields.includes(documentField)) {
+      throw new AppError("Invalid document field name", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Update driver record
+    driver[documentField] = documentUrl;
+    driver[expiryField] = expiryDateObj;
+    await driver.save();
+
+    return {
+      success: true,
+      message: "Document updated successfully",
+    };
+  }
+
+  static async uploadDriverDocument(driverId, file, policyType) {
+    if (!file) {
+      throw new AppError("File is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!driverId) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Driver ID is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!policyType) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Policy type is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Map policy type to document field
+    const policyTypeMap = {
+      "drivers-licence": {
+        documentField: "licenseDocumentFront",
+        expiryField: "licenseExpiry",
+        documentType: "LICENSE_FRONT",
       },
+      "motor-insurance": {
+        documentField: "motorInsuranceDocument",
+        expiryField: "motorInsuranceExpiry",
+        documentType: "MOTOR_INSURANCE",
+      },
+      "public-liability-insurance": {
+        documentField: "publicLiabilityDocument",
+        expiryField: "publicLiabilityExpiry",
+        documentType: "PUBLIC_LIABILITY",
+      },
+      "marine-cargo-insurance": {
+        documentField: "marineCargoInsuranceDocument",
+        expiryField: "marineCargoExpiry",
+        documentType: "MARINE_CARGO_INSURANCE",
+      },
+      "workers-comp-insurance": {
+        documentField: "workersCompDocument",
+        expiryField: "workersCompExpiry",
+        documentType: "WORKERS_COMP",
+      },
+    };
+
+    const fieldMapping = policyTypeMap[policyType];
+    if (!fieldMapping) {
+      // Clean up uploaded file
+      try {
+        await fs.unlink(file.path);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      throw new AppError("Invalid policy type", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const documentUrl = `/uploads/drivers/${driverId}/${file.filename}`;
+
+    // Update driver record with document URL
+    driver[fieldMapping.documentField] = documentUrl;
+    await driver.save();
+
+    // Also create/update DriverDocument record
+    await DriverDocument.findOneAndUpdate(
+      {
+        driverId: driverId,
+        documentType: fieldMapping.documentType,
+      },
+      {
+        driverId: driverId,
+        documentType: fieldMapping.documentType,
+        fileName: file.originalname,
+        fileUrl: documentUrl,
+        fileSize: file.size,
+        mimeType: file.mimetype,
+        uploadedAt: new Date(),
+      },
+      { upsert: true, new: true }
+    );
+
+    return {
+      success: true,
+      message: "Document uploaded successfully",
+      documentUrl: documentUrl,
+    };
+  }
+
+  static async sendLinkedDocument(docId, data) {
+    const { recipientEmail } = data;
+
+    // Validate recipientEmail
+    if (!recipientEmail) {
+      throw new AppError(
+        "Valid recipient email is required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(recipientEmail)) {
+      throw new AppError("Invalid email format", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Try to find in driver linked documents first
+    let linkedDoc = await DriverLinkedDocument.findById(docId).populate(
+      "template"
+    );
+
+    // If not found, try customer linked documents
+    if (!linkedDoc) {
+      linkedDoc = await CustomerLinkedDocument.findById(docId).populate(
+        "template"
+      );
+    }
+
+    if (!linkedDoc) {
+      throw new AppError(
+        "Linked document not found.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Get document content (use customizedContent if available, otherwise template content)
+    const documentContent =
+      linkedDoc.customizedContent || linkedDoc.template?.content || "";
+
+    // Send email
+    try {
+      await sendLinkedDocumentEmail({
+        to: recipientEmail,
+        subject: linkedDoc.template?.title || "Document",
+        content: documentContent,
+        documentName: linkedDoc.template?.title || "Document",
+      });
+    } catch (emailError) {
+      console.error("Error sending linked document email:", emailError);
+      throw new AppError(
+        "Failed to send document email. Please try again later.",
+        HttpStatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+
+    // Update linked document status
+    linkedDoc.status = "SENT";
+    linkedDoc.sentAt = new Date();
+    linkedDoc.sentTo = recipientEmail;
+    await linkedDoc.save();
+
+    return {
+      success: true,
+      message: "Document sent successfully",
+      sentAt: new Date().toISOString(),
+      sentTo: recipientEmail,
+    };
+  }
+
+  static async createDriverRate(driverId, data) {
+    const { serviceCode, vehicleType, payPerHour, payFtl, effectiveFrom } = data;
+
+    // Validate required fields
+    if (!serviceCode || !vehicleType) {
+      throw new AppError(
+        "Service code and vehicle type are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    if (!payPerHour && !payFtl) {
+      throw new AppError(
+        "Either payPerHour or payFtl must be provided",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if rates are locked (only check current rates)
+    const existingRates = await DriverRate.find({
+      driverId,
+      isLocked: true,
+      effectiveTo: null, // Only check current rates
+    });
+    if (existingRates.length > 0) {
+      throw new AppError(
+        "Rates are locked. Unlock before creating new rates.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Determine rate type
+    const rateType = payPerHour ? "HOURLY" : "FTL";
+
+    // Check for duplicate rate (only check current rates)
+    const duplicateQuery = {
+      driverId,
+      vehicleType,
+      rateType,
+      effectiveTo: null, // Only check current rates
+    };
+
+    if (rateType === "HOURLY") {
+      duplicateQuery.serviceCode = serviceCode;
+    } else {
+      duplicateQuery.laneKey = serviceCode; // For FTL, serviceCode is actually laneKey
+    }
+
+    const duplicateRate = await DriverRate.findOne(duplicateQuery);
+
+    if (duplicateRate) {
+      throw new AppError(
+        "Rate already exists for this service code and vehicle type",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create new rate
+    const rateData = {
+      driverId,
+      vehicleType,
+      rateType,
+      serviceCode: rateType === "HOURLY" ? serviceCode : null,
+      laneKey: rateType === "FTL" ? serviceCode : null,
+      payPerHour: payPerHour ? parseFloat(payPerHour) : null,
+      flatRate: payFtl ? parseFloat(payFtl) : null,
+      isLocked: false,
+      lockedAt: null,
+      effectiveFrom: effectiveFrom ? new Date(effectiveFrom) : new Date(),
+      effectiveTo: null,
+    };
+
+    const rate = await DriverRate.create(rateData);
+
+    return {
+      id: rate._id.toString(),
+      driverId: rate.driverId.toString(),
+      serviceCode: rate.serviceCode || rate.laneKey || null,
+      vehicleType: rate.vehicleType,
+      payPerHour: rate.payPerHour ? rate.payPerHour.toString() : null,
+      payFtl: rate.flatRate ? rate.flatRate.toString() : null,
+      lockedAt: rate.lockedAt ? rate.lockedAt.toISOString() : null,
+      effectiveFrom: rate.effectiveFrom ? rate.effectiveFrom.toISOString() : rate.createdAt.toISOString(),
+      effectiveTo: rate.effectiveTo ? rate.effectiveTo.toISOString() : null,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
     };
   }
 
@@ -226,26 +1020,52 @@ class MasterDataService {
     const rate = await DriverRate.findOne({
       _id: rateId,
       driverId,
+      effectiveTo: null, // Only update current rates
     });
 
     if (!rate) {
-      throw new AppError("Driver rate not found.", HttpStatusCodes.NOT_FOUND);
+      throw new AppError("Rate not found.", HttpStatusCodes.NOT_FOUND);
     }
 
     if (rate.isLocked) {
       throw new AppError(
-        "Cannot update locked rate.",
+        "Rates are locked. Unlock before updating.",
         HttpStatusCodes.BAD_REQUEST
       );
     }
 
-    Object.assign(rate, data);
+    // Update only provided fields
+    if (data.serviceCode !== undefined) {
+      if (rate.rateType === "HOURLY") {
+        rate.serviceCode = data.serviceCode;
+      } else {
+        rate.laneKey = data.serviceCode; // For FTL, serviceCode is laneKey
+      }
+    }
+    if (data.vehicleType !== undefined) {
+      rate.vehicleType = data.vehicleType;
+    }
+    if (data.payPerHour !== undefined) {
+      rate.payPerHour = data.payPerHour ? parseFloat(data.payPerHour) : null;
+    }
+    if (data.payFtl !== undefined) {
+      rate.flatRate = data.payFtl ? parseFloat(data.payFtl) : null;
+    }
+
     await rate.save();
 
     return {
-      success: true,
-      message: "Driver rate updated successfully",
-      rate: rate.toObject(),
+      id: rate._id.toString(),
+      driverId: rate.driverId.toString(),
+      serviceCode: rate.serviceCode || rate.laneKey || null,
+      vehicleType: rate.vehicleType,
+      payPerHour: rate.payPerHour ? rate.payPerHour.toString() : null,
+      payFtl: rate.flatRate ? rate.flatRate.toString() : null,
+      lockedAt: rate.lockedAt ? rate.lockedAt.toISOString() : null,
+      effectiveFrom: rate.effectiveFrom ? rate.effectiveFrom.toISOString() : rate.createdAt.toISOString(),
+      effectiveTo: rate.effectiveTo ? rate.effectiveTo.toISOString() : null,
+      createdAt: rate.createdAt,
+      updatedAt: rate.updatedAt,
     };
   }
 
@@ -253,15 +1073,16 @@ class MasterDataService {
     const rate = await DriverRate.findOne({
       _id: rateId,
       driverId,
+      effectiveTo: null, // Only delete current rates
     });
 
     if (!rate) {
-      throw new AppError("Driver rate not found.", HttpStatusCodes.NOT_FOUND);
+      throw new AppError("Rate not found.", HttpStatusCodes.NOT_FOUND);
     }
 
     if (rate.isLocked) {
       throw new AppError(
-        "Cannot delete locked rate.",
+        "Rates are locked. Unlock before deleting.",
         HttpStatusCodes.BAD_REQUEST
       );
     }
@@ -275,16 +1096,62 @@ class MasterDataService {
   }
 
   static async lockDriverRates(driverId) {
-    await DriverRate.updateMany({ driverId }, { isLocked: true });
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all current rates
+    const rates = await DriverRate.find({ driverId, isLocked: false });
+
+    if (rates.length === 0) {
+      throw new AppError(
+        "No rates found to lock",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Lock all rates
+    const lockedAt = new Date();
+    await DriverRate.updateMany(
+      { driverId, effectiveTo: null }, // Only lock current rates
+      { isLocked: true, lockedAt: lockedAt }
+    );
 
     return {
       success: true,
       message: "Driver rates locked successfully",
+      lockedAt: lockedAt.toISOString(),
     };
   }
 
   static async unlockDriverRates(driverId) {
-    await DriverRate.updateMany({ driverId }, { isLocked: false });
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all current locked rates
+    const rates = await DriverRate.find({
+      driverId,
+      isLocked: true,
+      effectiveTo: null, // Only unlock current rates
+    });
+
+    if (rates.length === 0) {
+      throw new AppError(
+        "Rates are not locked",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Unlock all rates
+    await DriverRate.updateMany(
+      { driverId, effectiveTo: null },
+      { isLocked: false, lockedAt: null }
+    );
 
     return {
       success: true,
@@ -293,57 +1160,307 @@ class MasterDataService {
   }
 
   static async applyCPIToDriverRates(driverId, percentage, effectiveFrom, createNewVersion) {
+    // Validate percentage
+    if (!percentage || isNaN(percentage) || percentage <= 0) {
+      throw new AppError(
+        "Percentage must be greater than 0",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all current rates (not expired, not locked)
     const rates = await DriverRate.find({
       driverId,
       isLocked: false,
+      effectiveTo: null, // Only current rates
     });
+
+    if (rates.length === 0) {
+      throw new AppError(
+        "No rates found to update",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Check if any rates are locked
+    const lockedRates = await DriverRate.find({
+      driverId,
+      isLocked: true,
+      effectiveTo: null,
+    });
+
+    if (lockedRates.length > 0) {
+      throw new AppError(
+        "Rates are locked. Unlock before applying CPI increase.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
 
     if (createNewVersion) {
       // Create new versions with updated rates
+      const newEffectiveFrom = effectiveFrom ? new Date(effectiveFrom) : new Date();
+
+      // Set effectiveTo on old rates
+      await DriverRate.updateMany(
+        { driverId, _id: { $in: rates.map((r) => r._id) } },
+        { effectiveTo: newEffectiveFrom }
+      );
+
+      // Create new rate versions
       const newRates = rates.map((rate) => ({
-        ...rate.toObject(),
-        _id: new mongoose.Types.ObjectId(),
+        driverId: rate.driverId,
+        serviceCode: rate.serviceCode,
+        vehicleType: rate.vehicleType,
+        rateType: rate.rateType,
+        laneKey: rate.laneKey,
         payPerHour: rate.payPerHour
-          ? (rate.payPerHour * (1 + percentage / 100)).toFixed(2)
+          ? parseFloat((rate.payPerHour * (1 + percentage / 100)).toFixed(2))
           : null,
         flatRate: rate.flatRate
-          ? (rate.flatRate * (1 + percentage / 100)).toFixed(2)
+          ? parseFloat((rate.flatRate * (1 + percentage / 100)).toFixed(2))
           : null,
-        createdAt: new Date(),
+        isLocked: false,
+        lockedAt: null,
+        effectiveFrom: newEffectiveFrom,
+        effectiveTo: null,
       }));
 
       await DriverRate.insertMany(newRates);
     } else {
       // Update in place
-      await DriverRate.updateMany(
-        { driverId, isLocked: false },
-        [
-          {
-            $set: {
-              payPerHour: {
-                $cond: [
-                  { $ne: ["$payPerHour", null] },
-                  { $multiply: ["$payPerHour", 1 + percentage / 100] },
-                  null,
-                ],
-              },
-              flatRate: {
-                $cond: [
-                  { $ne: ["$flatRate", null] },
-                  { $multiply: ["$flatRate", 1 + percentage / 100] },
-                  null,
-                ],
-              },
-            },
-          },
-        ]
-      );
+      for (const rate of rates) {
+        if (rate.payPerHour) {
+          rate.payPerHour = parseFloat(
+            (rate.payPerHour * (1 + percentage / 100)).toFixed(2)
+          );
+        }
+        if (rate.flatRate) {
+          rate.flatRate = parseFloat(
+            (rate.flatRate * (1 + percentage / 100)).toFixed(2)
+          );
+        }
+        await rate.save();
+      }
     }
 
     return {
       success: true,
       message: "CPI increase applied successfully",
-      updated: rates.length,
+      affectedCount: rates.length,
+      percentage,
+    };
+  }
+
+  static async copyHourlyHouseRates(driverId, rateIds) {
+    // Validate rateIds
+    if (!Array.isArray(rateIds) || rateIds.length === 0) {
+      throw new AppError("Rate IDs array is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if rates are locked (only check current rates)
+    const existingRates = await DriverRate.find({
+      driverId,
+      isLocked: true,
+      effectiveTo: null, // Only check current rates
+    });
+    if (existingRates.length > 0) {
+      throw new AppError(
+        "Rates are locked. Unlock before copying rates.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Find house driver (driver with contactType = "house")
+    const houseDriver = await Driver.findOne({ contactType: "house" });
+    if (!houseDriver) {
+      throw new AppError("House driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get house hourly rates (only current rates)
+    const houseRates = await DriverRate.find({
+      driverId: houseDriver._id,
+      _id: { $in: rateIds },
+      rateType: "HOURLY",
+      payPerHour: { $ne: null },
+      effectiveTo: null, // Only get current rates
+    });
+
+    if (houseRates.length !== rateIds.length) {
+      throw new AppError(
+        "One or more house rates not found",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Copy rates to driver
+    let copiedCount = 0;
+    for (const houseRate of houseRates) {
+      // Check if rate already exists for this driver (only current rates)
+      const existingRate = await DriverRate.findOne({
+        driverId: driverId,
+        serviceCode: houseRate.serviceCode,
+        vehicleType: houseRate.vehicleType,
+        rateType: "HOURLY",
+        effectiveTo: null, // Only check current rates
+      });
+
+      if (!existingRate) {
+        await DriverRate.create({
+          driverId: driverId,
+          serviceCode: houseRate.serviceCode,
+          vehicleType: houseRate.vehicleType,
+          rateType: "HOURLY",
+          payPerHour: houseRate.payPerHour,
+          flatRate: null,
+          laneKey: null,
+          isLocked: false,
+          lockedAt: null,
+          effectiveFrom: new Date(),
+          effectiveTo: null,
+        });
+        copiedCount++;
+      }
+    }
+
+    return {
+      success: true,
+      message: "Hourly rates copied successfully",
+      copiedCount,
+    };
+  }
+
+  static async copyFtlHouseRates(driverId, rateIds) {
+    // Validate rateIds
+    if (!Array.isArray(rateIds) || rateIds.length === 0) {
+      throw new AppError("Rate IDs array is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check if rates are locked (only check current rates)
+    const existingRates = await DriverRate.find({
+      driverId,
+      isLocked: true,
+      effectiveTo: null, // Only check current rates
+    });
+    if (existingRates.length > 0) {
+      throw new AppError(
+        "Rates are locked. Unlock before copying rates.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Find house driver (driver with contactType = "house")
+    const houseDriver = await Driver.findOne({ contactType: "house" });
+    if (!houseDriver) {
+      throw new AppError("House driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get house FTL rates (only current rates)
+    const houseRates = await DriverRate.find({
+      driverId: houseDriver._id,
+      _id: { $in: rateIds },
+      rateType: "FTL",
+      flatRate: { $ne: null },
+      effectiveTo: null, // Only get current rates
+    });
+
+    if (houseRates.length !== rateIds.length) {
+      throw new AppError(
+        "One or more house rates not found",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Copy rates to driver
+    let copiedCount = 0;
+    for (const houseRate of houseRates) {
+      // Check if rate already exists for this driver (only current rates)
+      const existingRate = await DriverRate.findOne({
+        driverId: driverId,
+        laneKey: houseRate.laneKey,
+        vehicleType: houseRate.vehicleType,
+        rateType: "FTL",
+        effectiveTo: null, // Only check current rates
+      });
+
+      if (!existingRate) {
+        await DriverRate.create({
+          driverId: driverId,
+          serviceCode: null,
+          vehicleType: houseRate.vehicleType,
+          rateType: "FTL",
+          payPerHour: null,
+          flatRate: houseRate.flatRate,
+          laneKey: houseRate.laneKey,
+          isLocked: false,
+          lockedAt: null,
+          effectiveFrom: new Date(),
+          effectiveTo: null,
+        });
+        copiedCount++;
+      }
+    }
+
+    return {
+      success: true,
+      message: "FTL rates copied successfully",
+      copiedCount,
+    };
+  }
+
+  static async updateDriverFuelLevy(driverId, data) {
+    const { driverFuelLevyPct } = data;
+
+    // Validate fuel levy
+    if (!driverFuelLevyPct && driverFuelLevyPct !== "0") {
+      throw new AppError(
+        "driverFuelLevyPct is required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const fuelLevyNum = parseFloat(driverFuelLevyPct);
+    if (isNaN(fuelLevyNum) || fuelLevyNum < 0) {
+      throw new AppError(
+        "Fuel levy percentage must be a valid number",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Update fuel levy
+    driver.driverFuelLevyPct = driverFuelLevyPct;
+    await driver.save();
+
+    // Return formatted driver
+    const formattedDriver = await this.getDriverById(driverId);
+
+    return {
+      success: true,
+      message: "Driver fuel levy updated successfully",
+      driver: formattedDriver,
     };
   }
 
@@ -1785,7 +2902,7 @@ class MasterDataService {
 
     // Find or create house driver
     const Driver = require("../models/driver.model");
-    let houseDriver = await Driver.findOne({ driverCode: "HOUSE" });
+    let houseDriver = await Driver.findOne({ contactType: "house" });
     if (!houseDriver) {
       // Create house driver if doesn't exist
       const Party = require("../models/party.model");
@@ -1796,6 +2913,7 @@ class MasterDataService {
       houseDriver = await Driver.create({
         partyId: party._id,
         driverCode: "HOUSE",
+        contactType: "house",
         employmentType: "EMPLOYEE",
         isActive: true,
       });
@@ -1818,6 +2936,10 @@ class MasterDataService {
           vehicleType: rate.vehicleType,
           laneKey: rate.laneKey,
           flatRate: rate.rateExGst,
+          isLocked: false,
+          lockedAt: null,
+          effectiveFrom: new Date(),
+          effectiveTo: null,
         });
         copied++;
       }
@@ -1833,7 +2955,7 @@ class MasterDataService {
   static async copyHourlyRatesToDriverPay() {
     // Find house driver
     const Driver = require("../models/driver.model");
-    let houseDriver = await Driver.findOne({ driverCode: "HOUSE" });
+    let houseDriver = await Driver.findOne({ contactType: "house" });
     if (!houseDriver) {
       const Party = require("../models/party.model");
       const party = await Party.create({
@@ -1843,6 +2965,7 @@ class MasterDataService {
       houseDriver = await Driver.create({
         partyId: party._id,
         driverCode: "HOUSE",
+        contactType: "house",
         employmentType: "EMPLOYEE",
         isActive: true,
       });
@@ -1871,6 +2994,10 @@ class MasterDataService {
           serviceCode: rate.serviceCode,
           vehicleType: rate.vehicleType,
           payPerHour: rate.rateExGst,
+          isLocked: false,
+          lockedAt: null,
+          effectiveFrom: new Date(),
+          effectiveTo: null,
         });
         copied++;
       }
@@ -2980,6 +4107,254 @@ class MasterDataService {
       },
       documentsUploaded: uploadedDocuments.length,
     };
+  }
+
+  // ==================== RCTI LOGS ====================
+
+  static async getRCTILogs(query, user) {
+    const RCTILog = require("../models/rctiLog.model");
+    const Driver = require("../models/driver.model");
+    const { driverId } = query;
+
+    // Build query
+    const queryObj = {};
+
+    // Filter by driver if provided
+    if (driverId) {
+      queryObj.driverId = driverId;
+    }
+
+    // Multi-tenant: Filter by organization if not super admin
+    // Note: RCTI logs don't have organizationId directly, so we filter through drivers
+    // For now, we'll return all logs (organization filtering can be added later when drivers have organizationId)
+
+    // Get RCTI logs
+    const logs = await RCTILog.find(queryObj)
+      .populate("driverId", "partyId")
+      .sort({ sentAt: -1 })
+      .lean();
+
+    // Format response
+    return logs.map((log) => ({
+      id: log._id.toString(),
+      driverId: log.driverId ? log.driverId._id.toString() : log.driverId.toString(),
+      driverName: log.driverName,
+      rctiNumber: log.rctiNumber,
+      payrunId: log.payrunId ? log.payrunId.toString() : log.payrunId,
+      payRunNumber: log.payRunNumber,
+      sentTo: log.sentTo,
+      sentAt: log.sentAt ? log.sentAt.toISOString() : null,
+      status: log.status,
+      autoSent: log.autoSent,
+      periodStart: log.periodStart.toISOString(),
+      periodEnd: log.periodEnd.toISOString(),
+      totalAmount: log.totalAmount,
+      errorMessage: log.errorMessage,
+      createdAt: log.createdAt.toISOString(),
+      updatedAt: log.updatedAt.toISOString(),
+    }));
+  }
+
+  static async sendRCTIs(payRunId, data, user) {
+    const PayRun = require("../models/payRun.model");
+    const PayRunDriver = require("../models/payRunDriver.model");
+    const Driver = require("../models/driver.model");
+    const Party = require("../models/party.model");
+    const RCTILog = require("../models/rctiLog.model");
+    const { sendRCTIEmail } = require("../utils/email");
+    const AppError = require("../utils/AppError");
+    const HttpStatusCodes = require("../utils/httpStatusCodes");
+
+    const { driverIds } = data || {};
+
+    // Verify pay run exists
+    const payRun = await PayRun.findById(payRunId);
+    if (!payRun) {
+      throw new AppError("Pay run not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      payRun.organizationId &&
+      payRun.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to this pay run",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Get pay run drivers
+    const payRunDriverQuery = { payrunId: payRunId };
+    if (driverIds && Array.isArray(driverIds) && driverIds.length > 0) {
+      payRunDriverQuery.driverId = { $in: driverIds };
+    }
+
+    const payRunDrivers = await PayRunDriver.find(payRunDriverQuery)
+      .populate({
+        path: "driverId",
+        populate: {
+          path: "partyId",
+          model: "Party",
+        },
+      })
+      .lean();
+
+    if (payRunDrivers.length === 0) {
+      throw new AppError(
+        "No drivers found in this pay run",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    let sentCount = 0;
+    let errorCount = 0;
+    const logs = [];
+
+    // Process each driver
+    for (const payRunDriver of payRunDrivers) {
+      const driver = payRunDriver.driverId;
+      if (!driver) continue;
+
+      // Check RCTI eligibility
+      if (!driver.rctiAgreementAccepted || !driver.gstRegistered) {
+        continue; // Skip drivers who haven't accepted RCTI agreement or aren't GST registered
+      }
+
+      let rctiLog = null;
+
+      try {
+        // Get driver party for email and name
+        const party = await Party.findById(driver.partyId);
+        if (!party || !party.email) {
+          throw new Error("Driver email not found");
+        }
+
+        // Generate unique RCTI number
+        const rctiNumber = await this.generateRCTINumber(
+          payRun.organizationId || user.activeOrganizationId
+        );
+
+        // Get driver name
+        const driverName =
+          party.firstName && party.lastName
+            ? `${party.firstName} ${party.lastName}`.trim()
+            : party.companyName || party.contactName || "Driver";
+
+        // Create RCTI log record
+        rctiLog = await RCTILog.create({
+          driverId: driver._id,
+          driverName: driverName,
+          rctiNumber: rctiNumber,
+          payrunId: payRunId,
+          payRunNumber: payRun.payRunNumber,
+          sentTo: party.email,
+          sentAt: null, // Will be set after successful send
+          status: "pending",
+          autoSent: false,
+          periodStart: payRun.periodStart,
+          periodEnd: payRun.periodEnd,
+          totalAmount: payRunDriver.totalAmount
+            ? payRunDriver.totalAmount.toString()
+            : "0.00",
+          errorMessage: null,
+        });
+
+        // Generate RCTI PDF (placeholder - implement PDF generation)
+        // const rctiPdf = await this.generateRCTIPDF({...});
+
+        // Send RCTI email
+        await sendRCTIEmail({
+          email: party.email,
+          rctiNumber: rctiNumber,
+          driverName: driverName,
+          payRunNumber: payRun.payRunNumber,
+          periodStart: payRun.periodStart,
+          periodEnd: payRun.periodEnd,
+          totalAmount: payRunDriver.totalAmount
+            ? payRunDriver.totalAmount.toString()
+            : "0.00",
+          // attachment: rctiPdf, // Uncomment when PDF generation is implemented
+          // attachmentName: `RCTI-${rctiNumber}.pdf`,
+        });
+
+        // Update log as successful
+        await RCTILog.findByIdAndUpdate(rctiLog._id, {
+          status: "success",
+          sentAt: new Date(),
+        });
+
+        sentCount++;
+        logs.push({
+          id: rctiLog._id.toString(),
+          driverId: driver._id.toString(),
+          status: "success",
+          rctiNumber: rctiNumber,
+        });
+      } catch (error) {
+        console.error(
+          `Error sending RCTI to driver ${driver._id}:`,
+          error
+        );
+
+        // Update log as failed
+        if (rctiLog) {
+          await RCTILog.findByIdAndUpdate(rctiLog._id, {
+            status: "failed",
+            sentAt: new Date(),
+            errorMessage: error.message || "Failed to send RCTI email",
+          });
+
+          logs.push({
+            id: rctiLog._id.toString(),
+            driverId: driver._id.toString(),
+            status: "failed",
+            errorMessage: error.message || "Failed to send RCTI email",
+          });
+        }
+
+        errorCount++;
+      }
+    }
+
+    return {
+      success: true,
+      message: "RCTIs sent successfully",
+      sentCount: sentCount,
+      totaldrivers: payRunDrivers.length,
+      errorCount: errorCount,
+      logs: logs,
+    };
+  }
+
+  static async generateRCTINumber(organizationId) {
+    const RCTILog = require("../models/rctiLog.model");
+    const year = new Date().getFullYear();
+    const prefix = `RCTI-${year}-`;
+
+    // Get the last RCTI number for this year and organization
+    // Note: For now, we'll generate globally unique numbers
+    // In production, you might want to filter by organizationId if added to RCTILog model
+    const lastLog = await RCTILog.findOne({
+      rctiNumber: { $regex: `^${prefix}` },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    let sequence = 1;
+    if (lastLog && lastLog.rctiNumber) {
+      const lastSequence = parseInt(
+        lastLog.rctiNumber.replace(prefix, ""),
+        10
+      );
+      if (!isNaN(lastSequence)) {
+        sequence = lastSequence + 1;
+      }
+    }
+
+    return `${prefix}${sequence.toString().padStart(3, "0")}`;
   }
 }
 

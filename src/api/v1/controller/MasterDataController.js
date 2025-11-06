@@ -8,6 +8,12 @@ class MasterDataController {
     return res.status(200).json(drivers);
   });
 
+  static getDriverById = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const driver = await MasterDataService.getDriverById(id);
+    return res.status(200).json(driver);
+  });
+
   static createDriver = catchAsyncHandler(async (req, res) => {
     const result = await MasterDataService.createDriver(req.body);
     return res.status(201).json(result);
@@ -31,6 +37,75 @@ class MasterDataController {
     const { id } = req.params;
     const rates = await MasterDataService.getDriverRates(id);
     return res.status(200).json(rates);
+  });
+
+  // ==================== DRIVER LINKED DOCUMENTS ====================
+  static getDriverLinkedDocuments = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const linkedDocuments = await MasterDataService.getDriverLinkedDocuments(id);
+    return res.status(200).json(linkedDocuments);
+  });
+
+  static linkDocumentTemplateToDriver = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.linkDocumentTemplateToDriver(id, req.body);
+    return res.status(201).json(result);
+  });
+
+  static updateLinkedDocument = catchAsyncHandler(async (req, res) => {
+    const { docId } = req.params;
+    const result = await MasterDataService.updateLinkedDocument(docId, req.body);
+    return res.status(200).json(result);
+  });
+
+  static deleteLinkedDocument = catchAsyncHandler(async (req, res) => {
+    const { docId } = req.params;
+    const result = await MasterDataService.deleteLinkedDocument(docId);
+    return res.status(200).json(result);
+  });
+
+  static sendLinkedDocument = catchAsyncHandler(async (req, res) => {
+    const { docId } = req.params;
+    const result = await MasterDataService.sendLinkedDocument(docId, req.body);
+    return res.status(200).json(result);
+  });
+
+  // ==================== DRIVER DOCUMENT UPLOAD ====================
+  static uploadFile = catchAsyncHandler(async (req, res) => {
+    const file = req.file;
+    const result = await MasterDataService.uploadFile(file);
+    return res.status(200).json(result);
+  });
+
+  static updateDriverDocument = catchAsyncHandler(async (req, res) => {
+    const { driverId } = req.params;
+    const result = await MasterDataService.updateDriverDocument(driverId, req.body);
+    return res.status(200).json(result);
+  });
+
+  static uploadDriverDocument = catchAsyncHandler(async (req, res) => {
+    const { driverId, policyType } = req.body;
+    const file = req.file;
+
+    try {
+      const result = await MasterDataService.uploadDriverDocument(
+        driverId,
+        file,
+        policyType
+      );
+      return res.status(200).json(result);
+    } catch (error) {
+      // Clean up uploaded file on error
+      if (file && file.path) {
+        const fs = require("fs").promises;
+        try {
+          await fs.unlink(file.path);
+        } catch (cleanupError) {
+          // Ignore cleanup errors
+        }
+      }
+      throw error;
+    }
   });
 
   static createDriverRate = catchAsyncHandler(async (req, res) => {
@@ -72,6 +147,26 @@ class MasterDataController {
       effectiveFrom,
       createNewVersion
     );
+    return res.status(200).json(result);
+  });
+
+  static copyHourlyHouseRates = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { rateIds } = req.body;
+    const result = await MasterDataService.copyHourlyHouseRates(id, rateIds);
+    return res.status(200).json(result);
+  });
+
+  static copyFtlHouseRates = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { rateIds } = req.body;
+    const result = await MasterDataService.copyFtlHouseRates(id, rateIds);
+    return res.status(200).json(result);
+  });
+
+  static updateDriverFuelLevy = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.updateDriverFuelLevy(id, req.body);
     return res.status(200).json(result);
   });
 
@@ -571,6 +666,21 @@ class MasterDataController {
   static getFtlHouseRates = catchAsyncHandler(async (req, res) => {
     const rates = await MasterDataService.getFtlHouseRates();
     return res.status(200).json(rates);
+  });
+  // ==================== RCTI LOGS ====================
+  static getRCTILogs = catchAsyncHandler(async (req, res) => {
+    const logs = await MasterDataService.getRCTILogs(req.query, req.user);
+    return res.status(200).json(logs);
+  });
+
+  static sendRCTIs = catchAsyncHandler(async (req, res) => {
+    const { payRunId } = req.params;
+    const result = await MasterDataService.sendRCTIs(
+      payRunId,
+      req.body,
+      req.user
+    );
+    return res.status(200).json(result);
   });
 }
 
