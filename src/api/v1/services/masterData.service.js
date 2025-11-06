@@ -17,6 +17,7 @@ const InductionToken = require("../models/inductionToken.model");
 const CustomerDocument = require("../models/customerDocument.model");
 const CustomerLinkedDocument = require("../models/customerLinkedDocument.model");
 const OperationsContact = require("../models/operationsContact.model");
+const BillingContact = require("../models/billingContact.model");
 const User = require("../models/user.model");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
@@ -739,6 +740,158 @@ class MasterDataService {
 
     // Delete contact
     await OperationsContact.deleteOne({ _id: contactId });
+
+    return {
+      success: true,
+      message: "Contact deleted successfully",
+    };
+  }
+
+  // ==================== BILLING CONTACTS ====================
+
+  static async getBillingContacts(customerId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get all billing contacts for this customer
+    const contacts = await BillingContact.find({ customerId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return contacts.map((contact) => ({
+      id: contact._id.toString(),
+      customerId: contact.customerId.toString(),
+      name: contact.name,
+      position: contact.position || null,
+      email: contact.email || null,
+      phone: contact.phone || null,
+      mobile: contact.mobile || null,
+      isInvoiceReceiver: contact.isInvoiceReceiver || false,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    }));
+  }
+
+  static async createBillingContact(customerId, data) {
+    const { name, position, email, phone, mobile, isInvoiceReceiver } = data;
+
+    // Validate required fields
+    if (!name || name.trim() === "") {
+      throw new AppError("Name is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate email format if provided
+    if (email && email.trim() !== "") {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email.trim())) {
+        throw new AppError("Invalid email format", HttpStatusCodes.BAD_REQUEST);
+      }
+    }
+
+    // Create contact
+    const contact = await BillingContact.create({
+      customerId,
+      name: name.trim(),
+      position: position?.trim() || null,
+      email: email?.trim() || null,
+      phone: phone?.trim() || null,
+      mobile: mobile?.trim() || null,
+      isInvoiceReceiver: isInvoiceReceiver !== undefined ? isInvoiceReceiver : false,
+    });
+
+    return {
+      id: contact._id.toString(),
+      customerId: contact.customerId.toString(),
+      name: contact.name,
+      position: contact.position || null,
+      email: contact.email || null,
+      phone: contact.phone || null,
+      mobile: contact.mobile || null,
+      isInvoiceReceiver: contact.isInvoiceReceiver || false,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    };
+  }
+
+  static async updateBillingContact(customerId, contactId, data) {
+    const { name, position, email, phone, mobile, isInvoiceReceiver } = data;
+
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify contact exists and belongs to customer
+    const contact = await BillingContact.findOne({
+      _id: contactId,
+      customerId: customerId,
+    });
+
+    if (!contact) {
+      throw new AppError("Contact not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate email format if provided
+    if (email !== undefined && email !== null && email.trim() !== "") {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email.trim())) {
+        throw new AppError("Invalid email format", HttpStatusCodes.BAD_REQUEST);
+      }
+    }
+
+    // Update contact (only provided fields)
+    if (name !== undefined) contact.name = name.trim();
+    if (position !== undefined) contact.position = position?.trim() || null;
+    if (email !== undefined) contact.email = email?.trim() || null;
+    if (phone !== undefined) contact.phone = phone?.trim() || null;
+    if (mobile !== undefined) contact.mobile = mobile?.trim() || null;
+    if (isInvoiceReceiver !== undefined) contact.isInvoiceReceiver = isInvoiceReceiver;
+
+    await contact.save();
+
+    return {
+      id: contact._id.toString(),
+      customerId: contact.customerId.toString(),
+      name: contact.name,
+      position: contact.position || null,
+      email: contact.email || null,
+      phone: contact.phone || null,
+      mobile: contact.mobile || null,
+      isInvoiceReceiver: contact.isInvoiceReceiver || false,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    };
+  }
+
+  static async deleteBillingContact(customerId, contactId) {
+    // Verify customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify contact exists and belongs to customer
+    const contact = await BillingContact.findOne({
+      _id: contactId,
+      customerId: customerId,
+    });
+
+    if (!contact) {
+      throw new AppError("Contact not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Delete contact
+    await BillingContact.deleteOne({ _id: contactId });
 
     return {
       success: true,

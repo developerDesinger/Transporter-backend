@@ -185,6 +185,35 @@ router.delete(
   MasterDataController.deleteOperationsContact
 );
 
+// ==================== BILLING CONTACTS ====================
+router.get(
+  "/customers/:id/billing-contacts",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getBillingContacts
+);
+
+router.post(
+  "/customers/:id/billing-contacts",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.createBillingContact
+);
+
+router.patch(
+  "/customers/:id/billing-contacts/:contactId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updateBillingContact
+);
+
+router.delete(
+  "/customers/:id/billing-contacts/:contactId",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteBillingContact
+);
+
 router.patch(
   "/customers/:id/status",
   requirePermission("master_data.manage"),

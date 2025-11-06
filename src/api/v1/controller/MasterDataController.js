@@ -142,6 +142,31 @@ class MasterDataController {
     return res.status(200).json(result);
   });
 
+  // ==================== BILLING CONTACTS ====================
+  static getBillingContacts = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const contacts = await MasterDataService.getBillingContacts(id);
+    return res.status(200).json(contacts);
+  });
+
+  static createBillingContact = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const contact = await MasterDataService.createBillingContact(id, req.body);
+    return res.status(201).json(contact);
+  });
+
+  static updateBillingContact = catchAsyncHandler(async (req, res) => {
+    const { id, contactId } = req.params;
+    const contact = await MasterDataService.updateBillingContact(id, contactId, req.body);
+    return res.status(200).json(contact);
+  });
+
+  static deleteBillingContact = catchAsyncHandler(async (req, res) => {
+    const { id, contactId } = req.params;
+    const result = await MasterDataService.deleteBillingContact(id, contactId);
+    return res.status(200).json(result);
+  });
+
   // ==================== RATE CARDS ====================
   static getAllRateCards = catchAsyncHandler(async (req, res) => {
     const rateCards = await MasterDataService.getAllRateCards(req.query);
