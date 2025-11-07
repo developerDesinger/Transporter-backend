@@ -286,6 +286,7 @@ app.use("/api/v1", masterDataRoutes);
 const MasterDataController = require("./src/api/v1/controller/MasterDataController");
 const catchAsyncHandler = require("./src/api/v1/utils/catchAsyncHandler");
 const { isAuthenticated } = require("./src/api/v1/middlewares/auth.middleware");
+const { requireAnyPermission } = require("./src/api/v1/middlewares/permission.middleware");
 const fs = require("fs").promises;
 
 // Configure multer for generic file uploads
@@ -456,6 +457,14 @@ app.post(
     });
   },
   MasterDataController.uploadDriverDocument
+);
+
+// Get driver uploads endpoint
+app.get(
+  "/api/driver-uploads/:driverId",
+  isAuthenticated,
+  requireAnyPermission("drivers.view", "master_data.view"),
+  MasterDataController.getDriverUploads
 );
 
 app.post("/upload-image", async (req, res) => {

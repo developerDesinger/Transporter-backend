@@ -378,12 +378,12 @@ class MasterDataController {
 
   // ==================== RATE CARDS ====================
   static getAllRateCards = catchAsyncHandler(async (req, res) => {
-    const rateCards = await MasterDataService.getAllRateCards(req.query);
+    const rateCards = await MasterDataService.getAllRateCards(req.query, req.user);
     return res.status(200).json(rateCards);
   });
 
   static createRateCard = catchAsyncHandler(async (req, res) => {
-    const result = await MasterDataService.createRateCard(req.body);
+    const result = await MasterDataService.createRateCard(req.body, req.user);
     return res.status(201).json(result);
   });
 
@@ -412,13 +412,54 @@ class MasterDataController {
   });
 
   static applyCPIToRateCards = catchAsyncHandler(async (req, res) => {
-    const { percentage, effectiveFrom, createNewVersion, rateType } = req.body;
-    const result = await MasterDataService.applyCPIToRateCards(
-      percentage,
-      effectiveFrom,
-      createNewVersion,
-      rateType
-    );
+    const result = await MasterDataService.applyCPIToRateCards(req.body, req.user);
+    return res.status(200).json(result);
+  });
+
+  // ==================== HOURLY HOUSE RATES ====================
+  static getAllHourlyHouseRates = catchAsyncHandler(async (req, res) => {
+    const rates = await MasterDataService.getAllHourlyHouseRates(req.query, req.user);
+    return res.status(200).json(rates);
+  });
+
+  static updateHourlyHouseRate = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.updateHourlyHouseRate(id, req.body);
+    return res.status(200).json(result);
+  });
+
+  static deleteHourlyHouseRate = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.deleteHourlyHouseRate(id);
+    return res.status(200).json(result);
+  });
+
+  // ==================== FTL HOUSE RATES ====================
+  static getFtlHouseRates = catchAsyncHandler(async (req, res) => {
+    const rates = await MasterDataService.getFtlHouseRates(req.query, req.user);
+    return res.status(200).json(rates);
+  });
+
+  static updateFtlHouseRate = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.updateFtlHouseRate(id, req.body);
+    return res.status(200).json(result);
+  });
+
+  static deleteFtlHouseRate = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.deleteFtlHouseRate(id);
+    return res.status(200).json(result);
+  });
+
+  static uploadFtlHouseRates = catchAsyncHandler(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ message: "File is required" });
+    }
+
+    const csvData = req.file.buffer.toString("utf-8");
+    const { customerId } = req.body;
+    const result = await MasterDataService.uploadFtlHouseRates(csvData, customerId, req.user);
     return res.status(200).json(result);
   });
 
@@ -437,40 +478,40 @@ class MasterDataController {
     const result = await MasterDataService.uploadRateCards(
       csvData,
       rateType,
-      customerId
+      customerId,
+      req.user
     );
     return res.status(200).json(result);
   });
 
   static copyFTLRatesToDriverPay = catchAsyncHandler(async (req, res) => {
-    const result = await MasterDataService.copyFTLRatesToDriverPay();
+    const result = await MasterDataService.copyFTLRatesToDriverPay(req.user);
     return res.status(200).json(result);
   });
 
   static copyHourlyRatesToDriverPay = catchAsyncHandler(async (req, res) => {
-    const result = await MasterDataService.copyHourlyRatesToDriverPay();
+    const result = await MasterDataService.copyHourlyRatesToDriverPay(req.user);
     return res.status(200).json(result);
   });
 
   // ==================== FUEL LEVIES ====================
   static getAllFuelLevies = catchAsyncHandler(async (req, res) => {
-    const levies = await MasterDataService.getAllFuelLevies();
+    const levies = await MasterDataService.getAllFuelLevies(req.user);
     return res.status(200).json(levies);
   });
 
   static getCurrentFuelLevy = catchAsyncHandler(async (req, res) => {
-    const { rateType } = req.query;
-    const levy = await MasterDataService.getCurrentFuelLevy(rateType);
+    const levy = await MasterDataService.getCurrentFuelLevy(req.user);
     return res.status(200).json(levy);
   });
 
   static getCurrentFuelLevies = catchAsyncHandler(async (req, res) => {
-    const levies = await MasterDataService.getCurrentFuelLevies();
+    const levies = await MasterDataService.getCurrentFuelLevies(req.user);
     return res.status(200).json(levies);
   });
 
   static createFuelLevy = catchAsyncHandler(async (req, res) => {
-    const result = await MasterDataService.createFuelLevy(req.body);
+    const result = await MasterDataService.createFuelLevy(req.body, req.user);
     return res.status(201).json(result);
   });
 
@@ -482,47 +523,47 @@ class MasterDataController {
 
   // ==================== SERVICE CODES ====================
   static getAllServiceCodes = catchAsyncHandler(async (req, res) => {
-    const codes = await MasterDataService.getAllServiceCodes();
+    const codes = await MasterDataService.getAllServiceCodes(req.user, req.query);
     return res.status(200).json(codes);
   });
 
   static createServiceCode = catchAsyncHandler(async (req, res) => {
-    const result = await MasterDataService.createServiceCode(req.body);
+    const result = await MasterDataService.createServiceCode(req.body, req.user);
     return res.status(201).json(result);
   });
 
   static updateServiceCode = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
-    const result = await MasterDataService.updateServiceCode(id, req.body);
+    const result = await MasterDataService.updateServiceCode(id, req.body, req.user);
     return res.status(200).json(result);
   });
 
   static deleteServiceCode = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
-    const result = await MasterDataService.deleteServiceCode(id);
+    const result = await MasterDataService.deleteServiceCode(id, req.user);
     return res.status(200).json(result);
   });
 
   // ==================== ANCILLARIES ====================
   static getAllAncillaries = catchAsyncHandler(async (req, res) => {
-    const ancillaries = await MasterDataService.getAllAncillaries();
+    const ancillaries = await MasterDataService.getAllAncillaries(req.user, req.query);
     return res.status(200).json(ancillaries);
   });
 
   static createAncillary = catchAsyncHandler(async (req, res) => {
-    const result = await MasterDataService.createAncillary(req.body);
+    const result = await MasterDataService.createAncillary(req.body, req.user);
     return res.status(201).json(result);
   });
 
   static updateAncillary = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
-    const result = await MasterDataService.updateAncillary(id, req.body);
+    const result = await MasterDataService.updateAncillary(id, req.body, req.user);
     return res.status(200).json(result);
   });
 
   static deleteAncillary = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
-    const result = await MasterDataService.deleteAncillary(id);
+    const result = await MasterDataService.deleteAncillary(id, req.user);
     return res.status(200).json(result);
   });
 
@@ -681,6 +722,16 @@ class MasterDataController {
       req.user
     );
     return res.status(200).json(result);
+  });
+
+  // ==================== DRIVER UPLOADS ====================
+  static getDriverUploads = catchAsyncHandler(async (req, res) => {
+    const { driverId } = req.params;
+    const uploads = await MasterDataService.getDriverUploads(
+      driverId,
+      req.user
+    );
+    return res.status(200).json(uploads);
   });
 }
 

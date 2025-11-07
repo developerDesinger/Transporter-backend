@@ -37,9 +37,22 @@ const RateCardSchema = new mongoose.Schema(
       type: Date,
       required: true,
       default: Date.now,
+      index: true,
+    },
+    effectiveTo: {
+      type: Date,
+      default: null, // null = current rate
+      index: true,
     },
     description: { type: String },
     isLocked: { type: Boolean, default: false },
+    lockedAt: { type: Date, default: null }, // Timestamp when rate was locked
+    // Multi-tenant support
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      index: true,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
@@ -47,6 +60,8 @@ const RateCardSchema = new mongoose.Schema(
 // Compound index for rate lookups
 RateCardSchema.index({ customerId: 1, rateType: 1, serviceCode: 1, vehicleType: 1 });
 RateCardSchema.index({ customerId: 1, rateType: 1, vehicleType: 1, laneKey: 1 });
+RateCardSchema.index({ customerId: 1, rateType: 1, effectiveTo: 1 }); // For current rates lookup
+RateCardSchema.index({ organizationId: 1, customerId: 1, rateType: 1 }); // Multi-tenant filtering
 
 module.exports = mongoose.model("RateCard", RateCardSchema);
 

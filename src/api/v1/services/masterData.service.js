@@ -467,16 +467,13 @@ class MasterDataService {
       id: rate._id.toString(),
       driverId: rate.driverId.toString(),
       serviceCode: rate.serviceCode || rate.laneKey || null, // For FTL, use laneKey as serviceCode
-      vehicleType: rate.vehicleType,
       payPerHour: rate.payPerHour ? rate.payPerHour.toString() : null,
-      payFtl: rate.flatRate ? rate.flatRate.toString() : null,
-      rateType: rate.rateType,
-      laneKey: rate.laneKey || null,
+      payFtl: rate.flatRate ? rate.flatRate.toString() : null, // Map flatRate to payFtl
+      minHours: null, // Not in model currently, but included for API compatibility
       lockedAt: rate.lockedAt ? rate.lockedAt.toISOString() : null,
       effectiveFrom: rate.effectiveFrom ? rate.effectiveFrom.toISOString() : rate.createdAt.toISOString(),
       effectiveTo: rate.effectiveTo ? rate.effectiveTo.toISOString() : null,
-      createdAt: rate.createdAt,
-      updatedAt: rate.updatedAt,
+      createdAt: rate.createdAt ? rate.createdAt.toISOString() : new Date().toISOString(),
     }));
   }
 
@@ -841,6 +838,9 @@ class MasterDataService {
         fileSize: file.size,
         mimeType: file.mimetype,
         uploadedAt: new Date(),
+        status: "PENDING", // Default status for new uploads
+        reviewedAt: null,
+        reviewedBy: null,
       },
       { upsert: true, new: true }
     );
@@ -2662,18 +2662,60 @@ class MasterDataService {
       throw new AppError("Customer not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    // Update party if provided
-    if (data.party && customer.party) {
-      Object.assign(customer.party, data.party);
-      await customer.party.save();
+    // Fields that belong to Party model
+    const partyFields = [
+      "companyName",
+      "firstName",
+      "lastName",
+      "email",
+      "phone",
+      "phoneAlt",
+      "contactName",
+      "suburb",
+      "state",
+      "postcode",
+      "address",
+      "registeredAddress",
+      "abn",
+      "stateRegion",
+    ];
+
+    // Update party - handle both nested party object and root-level party fields
+    if (customer.party) {
+      const partyUpdates = {};
+
+      // If party data is nested in data.party
+      if (data.party && typeof data.party === "object") {
+        Object.assign(partyUpdates, data.party);
+      }
+
+      // Also check for party fields at root level
+      partyFields.forEach((field) => {
+        if (data[field] !== undefined) {
+          partyUpdates[field] = data[field];
+        }
+      });
+
+      // Apply updates to party if any
+      if (Object.keys(partyUpdates).length > 0) {
+        Object.assign(customer.party, partyUpdates);
+        await customer.party.save();
+      }
     }
 
-    // Update customer fields
+    // Update customer fields (exclude party fields and nested party object)
     const customerFields = { ...data };
     delete customerFields.party;
+    // Remove party fields from customerFields
+    partyFields.forEach((field) => {
+      delete customerFields[field];
+    });
 
-    Object.assign(customer, customerFields);
-    await customer.save();
+    // Only update if there are customer-specific fields
+    if (Object.keys(customerFields).length > 0) {
+      Object.assign(customer, customerFields);
+      await customer.save();
+    }
 
     const populated = await Customer.findById(customer._id).populate("party");
 
@@ -2690,8 +2732,10 @@ class MasterDataService {
 
   // ==================== RATE CARDS ====================
 
-  static async getAllRateCards(query) {
-    const filter = {};
+  static async getAllRateCards(query, user) {
+    const filter = {
+      effectiveTo: null, // Only current rates by default
+    };
 
     if (query.customerId) {
       filter.customerId = query.customerId;
@@ -2699,6 +2743,11 @@ class MasterDataService {
 
     if (query.rateType) {
       filter.rateType = query.rateType;
+    }
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
     }
 
     const rateCards = await RateCard.find(filter)
@@ -2713,21 +2762,75 @@ class MasterDataService {
       serviceCode: card.serviceCode,
       vehicleType: card.vehicleType,
       laneKey: card.laneKey,
-      rateExGst: card.rateExGst,
-      effectiveFrom: card.effectiveFrom,
+      rateExGst: card.rateExGst ? card.rateExGst.toString() : "0.00",
+      effectiveFrom: card.effectiveFrom ? card.effectiveFrom.toISOString() : new Date().toISOString(),
       description: card.description,
-      isLocked: card.isLocked,
-      createdAt: card.createdAt,
+      isLocked: card.isLocked || false,
+      lockedAt: card.lockedAt ? card.lockedAt.toISOString() : null,
+      createdAt: card.createdAt ? card.createdAt.toISOString() : new Date().toISOString(),
     }));
   }
 
-  static async createRateCard(data) {
-    const rateCard = await RateCard.create(data);
+  static async createRateCard(data, user) {
+    const Customer = require("../models/customer.model");
+    const Party = require("../models/party.model");
+
+    // Validate required fields
+    if (!data.rateType || !data.vehicleType || !data.rateExGst) {
+      throw new AppError(
+        "rateType, vehicleType, and rateExGst are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Verify customer exists if customerId provided
+    if (data.customerId) {
+      const customer = await Customer.findById(data.customerId);
+      if (!customer) {
+        throw new AppError("Customer not found", HttpStatusCodes.NOT_FOUND);
+      }
+
+      // Check organization access (multi-tenant)
+      if (
+        !user.isSuperAdmin &&
+        user.activeOrganizationId &&
+        customer.organizationId &&
+        customer.organizationId.toString() !== user.activeOrganizationId.toString()
+      ) {
+        throw new AppError(
+          "Access denied to this customer",
+          HttpStatusCodes.FORBIDDEN
+        );
+      }
+    }
+
+    // Prepare rate card data
+    const rateCardData = {
+      customerId: data.customerId || null,
+      rateType: data.rateType,
+      rateExGst: parseFloat(data.rateExGst),
+      vehicleType: data.vehicleType,
+      serviceCode: data.serviceCode || null,
+      laneKey: data.laneKey || null,
+      effectiveFrom: data.effectiveFrom ? new Date(data.effectiveFrom) : new Date(),
+      effectiveTo: null, // New rates are current
+      description: data.description || null,
+      isLocked: false,
+      lockedAt: null,
+      organizationId: user.activeOrganizationId || null,
+    };
+
+    const rateCard = await RateCard.create(rateCardData);
 
     return {
-      success: true,
-      message: "Rate card created successfully",
-      rateCard: rateCard.toObject(),
+      id: rateCard._id.toString(),
+      customerId: rateCard.customerId ? rateCard.customerId.toString() : null,
+      rateType: rateCard.rateType,
+      rate: rateCard.rateExGst.toString(),
+      rateExGst: rateCard.rateExGst.toString(),
+      serviceCode: rateCard.serviceCode,
+      vehicleType: rateCard.vehicleType,
+      createdAt: rateCard.createdAt.toISOString(),
     };
   }
 
@@ -2738,14 +2841,22 @@ class MasterDataService {
       throw new AppError("Rate card not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    if (rateCard.isLocked) {
+    if (rateCard.isLocked || rateCard.lockedAt) {
       throw new AppError(
         "Cannot update locked rate card.",
         HttpStatusCodes.BAD_REQUEST
       );
     }
 
-    Object.assign(rateCard, data);
+    // Update only provided fields
+    if (data.rateExGst !== undefined) {
+      rateCard.rateExGst = parseFloat(data.rateExGst);
+    }
+    if (data.serviceCode !== undefined) rateCard.serviceCode = data.serviceCode;
+    if (data.vehicleType !== undefined) rateCard.vehicleType = data.vehicleType;
+    if (data.laneKey !== undefined) rateCard.laneKey = data.laneKey;
+    if (data.description !== undefined) rateCard.description = data.description;
+
     await rateCard.save();
 
     return {
@@ -2783,12 +2894,22 @@ class MasterDataService {
       throw new AppError("Rate card not found.", HttpStatusCodes.NOT_FOUND);
     }
 
+    if (rateCard.isLocked || rateCard.lockedAt) {
+      throw new AppError(
+        "Rate card is already locked.",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    const lockedAt = new Date();
     rateCard.isLocked = true;
+    rateCard.lockedAt = lockedAt;
     await rateCard.save();
 
     return {
       success: true,
       message: "Rate card locked successfully",
+      lockedAt: lockedAt.toISOString(),
     };
   }
 
@@ -2799,6 +2920,7 @@ class MasterDataService {
     }
 
     rateCard.isLocked = false;
+    rateCard.lockedAt = null;
     await rateCard.save();
 
     return {
@@ -2807,35 +2929,131 @@ class MasterDataService {
     };
   }
 
-  static async applyCPIToRateCards(percentage, effectiveFrom, createNewVersion, rateType) {
-    const filter = { isLocked: false };
-    if (rateType) {
-      filter.rateType = rateType;
+  static async applyCPIToRateCards(data, user) {
+    const Customer = require("../models/customer.model");
+    const Party = require("../models/party.model");
+    const {
+      partyId,
+      rateType,
+      percentage,
+      createNewVersion,
+      effectiveFrom,
+      versionNotes,
+    } = data;
+
+    // Validate required fields
+    if (!partyId || !rateType || !percentage || createNewVersion === undefined) {
+      throw new AppError(
+        "partyId, rateType, percentage, and createNewVersion are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate percentage
+    if (!percentage || isNaN(percentage) || percentage <= 0) {
+      throw new AppError(
+        "Percentage must be greater than 0",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Get party
+    const party = await Party.findById(partyId);
+    if (!party) {
+      throw new AppError("Party not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Get customer for this party
+    const customer = await Customer.findOne({ partyId: party._id });
+    if (!customer) {
+      throw new AppError("Customer not found for this party", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      customer.organizationId &&
+      customer.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to this customer",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Get all current rates for this customer and rate type
+    const filter = {
+      customerId: customer._id,
+      rateType: rateType,
+      effectiveTo: null, // Only current rates
+      isLocked: false, // Only unlocked rates
+    };
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
     }
 
     const rateCards = await RateCard.find(filter);
 
+    if (rateCards.length === 0) {
+      throw new AppError(
+        "No rates found to update",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    let updatedCount = 0;
+    let newVersionCount = 0;
+    const newEffectiveFrom = effectiveFrom ? new Date(effectiveFrom) : new Date();
+
     if (createNewVersion) {
+      // Set effectiveTo on old rates
+      await RateCard.updateMany(
+        { _id: { $in: rateCards.map((r) => r._id) } },
+        { effectiveTo: newEffectiveFrom }
+      );
+
+      // Create new rate versions
       const newRates = rateCards.map((card) => ({
-        ...card.toObject(),
-        _id: new mongoose.Types.ObjectId(),
-        rateExGst: parseFloat((card.rateExGst * (1 + percentage / 100)).toFixed(2)),
-        createdAt: new Date(),
+        customerId: card.customerId,
+        rateType: card.rateType,
+        serviceCode: card.serviceCode,
+        vehicleType: card.vehicleType,
+        laneKey: card.laneKey,
+        rateExGst: parseFloat(
+          (card.rateExGst * (1 + percentage / 100)).toFixed(2)
+        ),
+        effectiveFrom: newEffectiveFrom,
+        effectiveTo: null,
+        description: versionNotes || card.description || null,
+        isLocked: false,
+        lockedAt: null,
+        organizationId: card.organizationId || user.activeOrganizationId || null,
       }));
 
       await RateCard.insertMany(newRates);
+      newVersionCount = newRates.length;
     } else {
-      // Update in place using aggregation pipeline
+      // Update in place
       for (const card of rateCards) {
-        card.rateExGst = parseFloat((card.rateExGst * (1 + percentage / 100)).toFixed(2));
+        card.rateExGst = parseFloat(
+          (card.rateExGst * (1 + percentage / 100)).toFixed(2)
+        );
+        if (versionNotes) {
+          card.description = versionNotes;
+        }
         await card.save();
+        updatedCount++;
       }
     }
 
     return {
       success: true,
       message: "CPI increase applied successfully",
-      updated: rateCards.length,
+      updatedCount: updatedCount,
+      newVersionCount: newVersionCount,
     };
   }
 
@@ -2866,7 +3084,11 @@ class MasterDataService {
           effectiveFrom: row.effectivefrom
             ? new Date(row.effectivefrom)
             : new Date(),
+          effectiveTo: null, // New rates are current
           description: row.description || "",
+          isLocked: false,
+          lockedAt: null,
+          organizationId: user ? (user.activeOrganizationId || null) : null,
         };
 
         if (rateType === "HOURLY") {
@@ -2893,129 +3115,339 @@ class MasterDataService {
     };
   }
 
-  static async copyFTLRatesToDriverPay() {
-    // Find house driver (customerId = null for FTL rates)
+  static async uploadFtlHouseRates(csvData, customerId, user) {
+    // Parse CSV data - FTL format: FROM ZONE,TO ZONE,VEHICLE TYPE,RATE
+    const lines = csvData.split("\n").filter((line) => line.trim());
+    if (lines.length < 2) {
+      throw new AppError("CSV file is empty or invalid.", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const headers = lines[0].split(",").map((h) => h.trim().toUpperCase());
+    const errors = [];
+    let count = 0;
+
+    // Find column indices
+    const fromZoneIndex = headers.findIndex(
+      (h) => h.includes("FROM") && h.includes("ZONE")
+    );
+    const toZoneIndex = headers.findIndex(
+      (h) => h.includes("TO") && h.includes("ZONE")
+    );
+    const vehicleTypeIndex = headers.findIndex(
+      (h) => h.includes("VEHICLE") && h.includes("TYPE")
+    );
+    const rateIndex = headers.findIndex((h) => h.includes("RATE"));
+
+    if (
+      fromZoneIndex === -1 ||
+      toZoneIndex === -1 ||
+      vehicleTypeIndex === -1 ||
+      rateIndex === -1
+    ) {
+      throw new AppError(
+        "CSV must contain: FROM ZONE, TO ZONE, VEHICLE TYPE, RATE columns",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(",").map((v) => v.trim());
+      if (values.length < headers.length) continue;
+
+      try {
+        const fromZone = values[fromZoneIndex];
+        const toZone = values[toZoneIndex];
+        const vehicleType = values[vehicleTypeIndex];
+        const rateExGst = parseFloat(values[rateIndex]);
+
+        if (!fromZone || !toZone || !vehicleType || isNaN(rateExGst)) {
+          errors.push({
+            row: i + 1,
+            error: "Missing required fields or invalid rate",
+          });
+          continue;
+        }
+
+        // Construct laneKey from zones
+        const laneKey = `${fromZone}-${toZone}`;
+
+        const rateCardData = {
+          customerId: customerId || null,
+          rateType: "FTL",
+          laneKey: laneKey,
+          vehicleType: vehicleType,
+          rateExGst: rateExGst,
+          effectiveFrom: new Date(),
+          effectiveTo: null,
+          isLocked: false,
+          lockedAt: null,
+          organizationId: user.activeOrganizationId || null,
+        };
+
+        await RateCard.create(rateCardData);
+        count++;
+      } catch (error) {
+        errors.push({
+          row: i + 1,
+          error: error.message,
+        });
+      }
+    }
+
+    return {
+      success: true,
+      count: count,
+      errors: errors,
+    };
+  }
+
+  static async copyFTLRatesToDriverPay(user) {
+    const Party = require("../models/party.model");
+    const Customer = require("../models/customer.model");
+    const Driver = require("../models/driver.model");
+
+    // Find House party (as per documentation)
+    const houseParty = await Party.findOne({ companyName: "House" });
+    if (!houseParty) {
+      throw new AppError(
+        "House party not found. Please create House party first.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Find House customer for this party
+    const houseCustomer = await Customer.findOne({ partyId: houseParty._id });
+    if (!houseCustomer) {
+      throw new AppError(
+        "House customer not found. Please create House customer first.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      houseCustomer.organizationId &&
+      houseCustomer.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to House customer",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Get all FTL rates for House customer (or customerId = null for backward compatibility)
     const ftlRates = await RateCard.find({
-      rateType: "FTL",
-      customerId: null, // House rates
+      $or: [
+        { customerId: houseCustomer._id, rateType: "FTL", effectiveTo: null },
+        { customerId: null, rateType: "FTL", effectiveTo: null }, // Backward compatibility
+      ],
     });
 
-    // Find or create house driver
-    const Driver = require("../models/driver.model");
+    if (ftlRates.length === 0) {
+      throw new AppError(
+        "No FTL rates found for House customer",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Find or create House driver
     let houseDriver = await Driver.findOne({ contactType: "house" });
     if (!houseDriver) {
       // Create house driver if doesn't exist
-      const Party = require("../models/party.model");
-      const party = await Party.create({
+      const driverParty = await Party.create({
         companyName: "House Driver",
         email: "house@system.local",
       });
       houseDriver = await Driver.create({
-        partyId: party._id,
+        partyId: driverParty._id,
         driverCode: "HOUSE",
         contactType: "house",
         employmentType: "EMPLOYEE",
         isActive: true,
+        organizationId: user.activeOrganizationId || null,
       });
     }
 
-    let copied = 0;
-    for (const rate of ftlRates) {
-      // Check if driver rate already exists
-      const existing = await DriverRate.findOne({
-        driverId: houseDriver._id,
-        rateType: "FTL",
-        vehicleType: rate.vehicleType,
-        laneKey: rate.laneKey,
-      });
+    let copiedCount = 0;
+    let skippedCount = 0;
+    const errors = [];
 
-      if (!existing) {
+    for (const rate of ftlRates) {
+      try {
+        // Check if driver rate already exists (only current rates)
+        const existing = await DriverRate.findOne({
+          driverId: houseDriver._id,
+          rateType: "FTL",
+          vehicleType: rate.vehicleType,
+          laneKey: rate.laneKey,
+          effectiveTo: null, // Only check current rates
+        });
+
+        if (existing) {
+          skippedCount++;
+          continue;
+        }
+
+        // Create driver rate
         await DriverRate.create({
           driverId: houseDriver._id,
           rateType: "FTL",
           vehicleType: rate.vehicleType,
           laneKey: rate.laneKey,
-          flatRate: rate.rateExGst,
+          flatRate: rate.rateExGst, // Map rateExGst to flatRate (payFtl)
           isLocked: false,
           lockedAt: null,
           effectiveFrom: new Date(),
           effectiveTo: null,
         });
-        copied++;
+        copiedCount++;
+      } catch (error) {
+        errors.push({ rate: rate._id.toString(), error: error.message });
       }
     }
 
     return {
       success: true,
-      message: "FTL rates copied to driver pay rates",
-      copied,
+      message: "Rates copied successfully",
+      copiedCount: copiedCount,
+      skippedCount: skippedCount,
+      errors: errors,
     };
   }
 
-  static async copyHourlyRatesToDriverPay() {
-    // Find house driver
+  static async copyHourlyRatesToDriverPay(user) {
+    const Party = require("../models/party.model");
+    const Customer = require("../models/customer.model");
     const Driver = require("../models/driver.model");
+
+    // Find House party (as per documentation)
+    const houseParty = await Party.findOne({ companyName: "House" });
+    if (!houseParty) {
+      throw new AppError(
+        "House party not found. Please create House party first.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Find House customer for this party
+    const houseCustomer = await Customer.findOne({ partyId: houseParty._id });
+    if (!houseCustomer) {
+      throw new AppError(
+        "House customer not found. Please create House customer first.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      houseCustomer.organizationId &&
+      houseCustomer.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to House customer",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Get all hourly rates for House customer (or customerId = null for backward compatibility)
+    const hourlyRates = await RateCard.find({
+      $or: [
+        { customerId: houseCustomer._id, rateType: "HOURLY", effectiveTo: null },
+        { customerId: null, rateType: "HOURLY", effectiveTo: null }, // Backward compatibility
+      ],
+    });
+
+    if (hourlyRates.length === 0) {
+      throw new AppError(
+        "No hourly rates found for House customer",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Find or create House driver
     let houseDriver = await Driver.findOne({ contactType: "house" });
     if (!houseDriver) {
-      const Party = require("../models/party.model");
-      const party = await Party.create({
+      // Create house driver if doesn't exist
+      const driverParty = await Party.create({
         companyName: "House Driver",
         email: "house@system.local",
       });
       houseDriver = await Driver.create({
-        partyId: party._id,
+        partyId: driverParty._id,
         driverCode: "HOUSE",
         contactType: "house",
         employmentType: "EMPLOYEE",
         isActive: true,
+        organizationId: user.activeOrganizationId || null,
       });
     }
 
-    // Find hourly house rates (customerId = null for hourly rates)
-    const hourlyRates = await RateCard.find({
-      rateType: "HOURLY",
-      customerId: null,
-    });
+    let copiedCount = 0;
+    let skippedCount = 0;
+    const errors = [];
 
-    let copied = 0;
     for (const rate of hourlyRates) {
-      // Check if driver rate already exists
-      const existing = await DriverRate.findOne({
-        driverId: houseDriver._id,
-        rateType: "HOURLY",
-        serviceCode: rate.serviceCode,
-        vehicleType: rate.vehicleType,
-      });
+      try {
+        // Check if driver rate already exists (only current rates)
+        const existing = await DriverRate.findOne({
+          driverId: houseDriver._id,
+          rateType: "HOURLY",
+          serviceCode: rate.serviceCode,
+          vehicleType: rate.vehicleType,
+          effectiveTo: null, // Only check current rates
+        });
 
-      if (!existing) {
+        if (existing) {
+          skippedCount++;
+          continue;
+        }
+
+        // Create driver rate
         await DriverRate.create({
           driverId: houseDriver._id,
           rateType: "HOURLY",
           serviceCode: rate.serviceCode,
           vehicleType: rate.vehicleType,
-          payPerHour: rate.rateExGst,
+          payPerHour: rate.rateExGst, // Map rateExGst to payPerHour
           isLocked: false,
           lockedAt: null,
           effectiveFrom: new Date(),
           effectiveTo: null,
         });
-        copied++;
+        copiedCount++;
+      } catch (error) {
+        errors.push({ rate: rate._id.toString(), error: error.message });
       }
     }
 
     return {
       success: true,
-      message: "Hourly rates copied to driver pay rates",
-      copied,
+      message: "Rates copied successfully",
+      copiedCount: copiedCount,
+      skippedCount: skippedCount,
+      errors: errors,
     };
   }
 
   // ==================== HOURLY HOUSE RATES ====================
-  static async getAllHourlyHouseRates() {
-    const rates = await RateCard.find({
+  static async getAllHourlyHouseRates(query, user) {
+    // Get only current rates (effectiveTo is null)
+    const filter = {
       customerId: null,
       rateType: "HOURLY",
-    })
+      effectiveTo: null, // Only current rates
+    };
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    const rates = await RateCard.find(filter)
       .sort({ serviceCode: 1, vehicleType: 1 })
       .lean();
 
@@ -3024,38 +3456,53 @@ class MasterDataService {
       customerId: null, // Always null for house rates
       serviceCode: rate.serviceCode,
       vehicleType: rate.vehicleType,
-      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
-      version: 1, // Default version if not in model
-      effectiveFrom: rate.effectiveFrom,
-      description: rate.description || null,
-      isLocked: rate.isLocked || false,
-      createdAt: rate.createdAt,
-      updatedAt: rate.updatedAt,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toString() : "0.00",
+      createdAt: rate.createdAt ? rate.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: rate.updatedAt ? rate.updatedAt.toISOString() : new Date().toISOString(),
     }));
   }
 
   // ==================== FTL HOUSE RATES ====================
-  static async getFtlHouseRates() {
-    const rates = await RateCard.find({
+  static async getFtlHouseRates(query, user) {
+    // Get only current rates (effectiveTo is null)
+    const filter = {
       customerId: null,
       rateType: "FTL",
-    })
+      effectiveTo: null, // Only current rates
+    };
+
+    // Filter by customerId if provided (for customer-specific FTL rates)
+    if (query && query.customerId) {
+      filter.customerId = query.customerId;
+    }
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    const rates = await RateCard.find(filter)
       .sort({ laneKey: 1, vehicleType: 1 })
       .lean();
 
-    return rates.map((rate) => ({
-      id: rate._id.toString(),
-      customerId: null, // Always null for house rates
-      laneKey: rate.laneKey,
-      vehicleType: rate.vehicleType,
-      rateExGst: rate.rateExGst ? rate.rateExGst.toFixed(2) : "0.00",
-      version: 1, // Default version if not in model
-      effectiveFrom: rate.effectiveFrom,
-      description: rate.description || null,
-      isLocked: rate.isLocked || false,
-      createdAt: rate.createdAt,
-      updatedAt: rate.updatedAt,
-    }));
+    return rates.map((rate) => {
+      // Parse laneKey to extract fromZone and toZone
+      // Format: "SYDNEY-MELBOURNE" or "SYD-MEL"
+      const laneParts = rate.laneKey ? rate.laneKey.split("-") : [];
+      const fromZone = laneParts[0] || null;
+      const toZone = laneParts.slice(1).join("-") || null;
+
+      return {
+        id: rate._id.toString(),
+        customerId: rate.customerId ? rate.customerId.toString() : null,
+        fromZone: fromZone,
+        toZone: toZone,
+        vehicleType: rate.vehicleType,
+        rateExGst: rate.rateExGst ? rate.rateExGst.toString() : "0.00",
+        createdAt: rate.createdAt ? rate.createdAt.toISOString() : new Date().toISOString(),
+        updatedAt: rate.updatedAt ? rate.updatedAt.toISOString() : new Date().toISOString(),
+      };
+    });
   }
 
   static async updateHourlyHouseRate(rateId, data) {
@@ -3063,26 +3510,35 @@ class MasterDataService {
       _id: rateId,
       customerId: null,
       rateType: "HOURLY",
+      effectiveTo: null, // Only update current rates
     });
 
     if (!rate) {
       throw new AppError("Hourly house rate not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    if (rate.isLocked) {
+    if (rate.isLocked || rate.lockedAt) {
       throw new AppError(
         "Cannot update locked rate.",
         HttpStatusCodes.BAD_REQUEST
       );
     }
 
-    Object.assign(rate, data);
+    // Update only provided fields
+    if (data.serviceCode !== undefined) rate.serviceCode = data.serviceCode;
+    if (data.vehicleType !== undefined) rate.vehicleType = data.vehicleType;
+    if (data.rateExGst !== undefined) {
+      rate.rateExGst = parseFloat(data.rateExGst);
+    }
+
     await rate.save();
 
     return {
-      success: true,
-      message: "Hourly house rate updated successfully",
-      rate: rate.toObject(),
+      id: rate._id.toString(),
+      serviceCode: rate.serviceCode,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toString() : "0.00",
+      updatedAt: rate.updatedAt ? rate.updatedAt.toISOString() : new Date().toISOString(),
     };
   }
 
@@ -3091,13 +3547,14 @@ class MasterDataService {
       _id: rateId,
       customerId: null,
       rateType: "HOURLY",
+      effectiveTo: null, // Only delete current rates
     });
 
     if (!rate) {
       throw new AppError("Hourly house rate not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    if (rate.isLocked) {
+    if (rate.isLocked || rate.lockedAt) {
       throw new AppError(
         "Cannot delete locked rate.",
         HttpStatusCodes.BAD_REQUEST
@@ -3108,111 +3565,299 @@ class MasterDataService {
 
     return {
       success: true,
-      message: "Hourly house rate deleted successfully",
+      message: "Rate deleted successfully",
+    };
+  }
+
+  static async updateFtlHouseRate(rateId, data) {
+    const rate = await RateCard.findOne({
+      _id: rateId,
+      customerId: null,
+      rateType: "FTL",
+      effectiveTo: null, // Only update current rates
+    });
+
+    if (!rate) {
+      throw new AppError("FTL house rate not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    if (rate.isLocked || rate.lockedAt) {
+      throw new AppError(
+        "Cannot update locked rate.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Update only provided fields
+    if (data.fromZone !== undefined || data.toZone !== undefined) {
+      // Reconstruct laneKey from fromZone and toZone
+      const fromZone = data.fromZone || (rate.laneKey ? rate.laneKey.split("-")[0] : "");
+      const toZone = data.toZone || (rate.laneKey ? rate.laneKey.split("-").slice(1).join("-") : "");
+      rate.laneKey = `${fromZone}-${toZone}`;
+    }
+    if (data.vehicleType !== undefined) rate.vehicleType = data.vehicleType;
+    if (data.rateExGst !== undefined) {
+      rate.rateExGst = parseFloat(data.rateExGst);
+    }
+
+    await rate.save();
+
+    // Parse laneKey for response
+    const laneParts = rate.laneKey ? rate.laneKey.split("-") : [];
+    const fromZone = laneParts[0] || null;
+    const toZone = laneParts.slice(1).join("-") || null;
+
+    return {
+      id: rate._id.toString(),
+      fromZone: fromZone,
+      toZone: toZone,
+      vehicleType: rate.vehicleType,
+      rateExGst: rate.rateExGst ? rate.rateExGst.toString() : "0.00",
+      updatedAt: rate.updatedAt ? rate.updatedAt.toISOString() : new Date().toISOString(),
+    };
+  }
+
+  static async deleteFtlHouseRate(rateId) {
+    const rate = await RateCard.findOne({
+      _id: rateId,
+      customerId: null,
+      rateType: "FTL",
+      effectiveTo: null, // Only delete current rates
+    });
+
+    if (!rate) {
+      throw new AppError("FTL house rate not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    if (rate.isLocked || rate.lockedAt) {
+      throw new AppError(
+        "Cannot delete locked rate.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    await RateCard.findByIdAndDelete(rateId);
+
+    return {
+      success: true,
+      message: "Rate deleted successfully",
     };
   }
 
   // ==================== FUEL LEVIES ====================
 
-  static async getAllFuelLevies() {
-    const levies = await FuelLevy.find().sort({ effectiveFrom: -1 }).lean();
+  static async getAllFuelLevies(user) {
+    const filter = {};
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    const levies = await FuelLevy.find(filter)
+      .sort({ version: -1 }) // Order by version descending
+      .lean();
 
     return levies.map((levy) => ({
       id: levy._id.toString(),
-      rateType: levy.rateType,
-      percentage: levy.percentage,
-      effectiveFrom: levy.effectiveFrom,
-      effectiveTo: levy.effectiveTo,
-      isActive: levy.isActive,
-      createdAt: levy.createdAt,
+      version: levy.version,
+      metroPct: levy.metroPct,
+      interstatePct: levy.interstatePct,
+      effectiveFrom: levy.effectiveFrom ? levy.effectiveFrom.toISOString() : new Date().toISOString(),
+      effectiveTo: levy.effectiveTo ? levy.effectiveTo.toISOString() : null,
+      notes: levy.notes || null,
+      pegDateFuelPrice: levy.pegDateFuelPrice || null,
+      newRefFuelPrice: levy.newRefFuelPrice || null,
+      lineHaulWeighting: levy.lineHaulWeighting || null,
+      localWeighting: levy.localWeighting || null,
+      createdAt: levy.createdAt ? levy.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: levy.updatedAt ? levy.updatedAt.toISOString() : new Date().toISOString(),
     }));
   }
 
-  static async getCurrentFuelLevy(rateType = null) {
+  static async getCurrentFuelLevy(user) {
     const filter = {
-      isActive: true,
-      effectiveFrom: { $lte: new Date() },
-      $or: [{ effectiveTo: null }, { effectiveTo: { $gte: new Date() } }],
+      effectiveTo: null, // Current active fuel levy
     };
 
-    if (rateType) {
-      filter.rateType = rateType;
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
     }
 
-    const levy = await FuelLevy.findOne(filter).sort({ effectiveFrom: -1 });
+    const levy = await FuelLevy.findOne(filter).sort({ version: -1 }).lean();
 
     if (!levy) {
-      throw new AppError("No active fuel levy found.", HttpStatusCodes.NOT_FOUND);
+      return null; // Return null if no active fuel levy exists
     }
 
     return {
       id: levy._id.toString(),
-      rateType: levy.rateType,
-      percentage: levy.percentage,
-      effectiveFrom: levy.effectiveFrom,
-      effectiveTo: levy.effectiveTo,
-      isActive: levy.isActive,
+      version: levy.version,
+      metroPct: levy.metroPct,
+      interstatePct: levy.interstatePct,
+      effectiveFrom: levy.effectiveFrom ? levy.effectiveFrom.toISOString() : new Date().toISOString(),
+      effectiveTo: null,
+      notes: levy.notes || null,
+      pegDateFuelPrice: levy.pegDateFuelPrice || null,
+      newRefFuelPrice: levy.newRefFuelPrice || null,
+      lineHaulWeighting: levy.lineHaulWeighting || null,
+      localWeighting: levy.localWeighting || null,
+      createdAt: levy.createdAt ? levy.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: levy.updatedAt ? levy.updatedAt.toISOString() : new Date().toISOString(),
     };
   }
 
-  static async getCurrentFuelLevies() {
-    // Get current fuel levies for both rate types
-    const hourlyLevy = await FuelLevy.findOne({
-      rateType: "HOURLY",
-      isActive: true,
-      effectiveFrom: { $lte: new Date() },
-      $or: [{ effectiveTo: null }, { effectiveTo: { $gte: new Date() } }],
-    }).sort({ effectiveFrom: -1 });
+  static async getCurrentFuelLevies(user) {
+    // Get current fuel levy (new structure has both metroPct and interstatePct in one record)
+    const currentLevy = await this.getCurrentFuelLevy(user);
 
-    const ftlLevy = await FuelLevy.findOne({
-      rateType: "FTL",
-      isActive: true,
-      effectiveFrom: { $lte: new Date() },
-      $or: [{ effectiveTo: null }, { effectiveTo: { $gte: new Date() } }],
-    }).sort({ effectiveFrom: -1 });
+    if (!currentLevy) {
+      return {
+        hourly: null,
+        ftl: null,
+      };
+    }
 
+    // Return in legacy format for backward compatibility
     return {
-      hourly: hourlyLevy
-        ? {
-            id: hourlyLevy._id.toString(),
-            rateType: hourlyLevy.rateType,
-            percentage: hourlyLevy.percentage || 0,
-            effectiveFrom: hourlyLevy.effectiveFrom,
-            effectiveTo: hourlyLevy.effectiveTo,
-            isActive: hourlyLevy.isActive,
-          }
-        : null,
-      ftl: ftlLevy
-        ? {
-            id: ftlLevy._id.toString(),
-            rateType: ftlLevy.rateType,
-            percentage: ftlLevy.percentage || 0,
-            effectiveFrom: ftlLevy.effectiveFrom,
-            effectiveTo: ftlLevy.effectiveTo,
-            isActive: ftlLevy.isActive,
-          }
-        : null,
+      hourly: {
+        id: currentLevy.id,
+        metroPct: currentLevy.metroPct,
+        interstatePct: null,
+        effectiveFrom: currentLevy.effectiveFrom,
+        effectiveTo: currentLevy.effectiveTo,
+        version: currentLevy.version,
+      },
+      ftl: {
+        id: currentLevy.id,
+        metroPct: null,
+        interstatePct: currentLevy.interstatePct,
+        effectiveFrom: currentLevy.effectiveFrom,
+        effectiveTo: currentLevy.effectiveTo,
+        version: currentLevy.version,
+      },
     };
   }
 
-  static async createFuelLevy(data) {
-    const { rateType, effectiveFrom } = data;
+  static async createFuelLevy(data, user) {
+    const {
+      metroPct,
+      interstatePct,
+      effectiveFrom,
+      notes,
+      pegDateFuelPrice,
+      newRefFuelPrice,
+      lineHaulWeighting,
+      localWeighting,
+    } = data;
 
-    // Deactivate previous active levy for this rateType
-    await FuelLevy.updateMany(
-      { rateType, isActive: true },
-      { isActive: false, effectiveTo: effectiveFrom || new Date() }
-    );
+    // Validate required fields
+    if (!metroPct || !interstatePct || !effectiveFrom) {
+      throw new AppError(
+        "metroPct, interstatePct, and effectiveFrom are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
 
-    const levy = await FuelLevy.create({
-      ...data,
-      isActive: true,
+    // Validate percentages
+    const metroValue = parseFloat(metroPct);
+    const interstateValue = parseFloat(interstatePct);
+
+    if (isNaN(metroValue) || isNaN(interstateValue)) {
+      throw new AppError(
+        "Percentages must be valid numbers",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    if (
+      metroValue < 0 ||
+      metroValue > 100 ||
+      interstateValue < 0 ||
+      interstateValue > 100
+    ) {
+      throw new AppError(
+        "Percentages must be between 0 and 100",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate effectiveFrom date
+    const effectiveFromDate = new Date(effectiveFrom);
+    if (isNaN(effectiveFromDate.getTime())) {
+      throw new AppError(
+        "effectiveFrom must be a valid date",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Get current active fuel levy
+    const filter = {
+      effectiveTo: null,
+    };
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    const currentFuelLevy = await FuelLevy.findOne(filter);
+
+    // If current active fuel levy exists, set its effectiveTo
+    if (currentFuelLevy) {
+      // Set effectiveTo to the day before new effectiveFrom
+      const newEffectiveFrom = new Date(effectiveFrom);
+      const previousEffectiveTo = new Date(newEffectiveFrom);
+      previousEffectiveTo.setDate(previousEffectiveTo.getDate() - 1);
+      previousEffectiveTo.setHours(23, 59, 59, 999); // End of day
+
+      currentFuelLevy.effectiveTo = previousEffectiveTo;
+      await currentFuelLevy.save();
+    }
+
+    // Get highest version number for this organization
+    const versionFilter = {};
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      versionFilter.organizationId = user.activeOrganizationId;
+    }
+
+    const highestVersion = await FuelLevy.findOne(versionFilter)
+      .sort({ version: -1 })
+      .select("version")
+      .lean();
+
+    const newVersion = (highestVersion?.version || 0) + 1;
+
+    // Create new fuel levy
+    const newFuelLevy = await FuelLevy.create({
+      version: newVersion,
+      metroPct: metroPct.trim(),
+      interstatePct: interstatePct.trim(),
+      effectiveFrom: effectiveFromDate,
+      effectiveTo: null, // New active fuel levy
+      notes: notes ? notes.trim() : null,
+      pegDateFuelPrice: pegDateFuelPrice ? pegDateFuelPrice.trim() : null,
+      newRefFuelPrice: newRefFuelPrice ? newRefFuelPrice.trim() : null,
+      lineHaulWeighting: lineHaulWeighting ? lineHaulWeighting.trim() : null,
+      localWeighting: localWeighting ? localWeighting.trim() : null,
+      organizationId: user.activeOrganizationId || null,
     });
 
     return {
-      success: true,
-      message: "Fuel levy created successfully",
-      fuelLevy: levy.toObject(),
+      id: newFuelLevy._id.toString(),
+      version: newFuelLevy.version,
+      metroPct: newFuelLevy.metroPct,
+      interstatePct: newFuelLevy.interstatePct,
+      effectiveFrom: newFuelLevy.effectiveFrom.toISOString(),
+      effectiveTo: null,
+      notes: newFuelLevy.notes || null,
+      pegDateFuelPrice: newFuelLevy.pegDateFuelPrice || null,
+      newRefFuelPrice: newFuelLevy.newRefFuelPrice || null,
+      lineHaulWeighting: newFuelLevy.lineHaulWeighting || null,
+      localWeighting: newFuelLevy.localWeighting || null,
+      createdAt: newFuelLevy.createdAt.toISOString(),
+      updatedAt: newFuelLevy.updatedAt.toISOString(),
     };
   }
 
@@ -3234,53 +3879,217 @@ class MasterDataService {
 
   // ==================== SERVICE CODES ====================
 
-  static async getAllServiceCodes() {
-    const codes = await ServiceCode.find().sort({ code: 1 }).lean();
+  static async getAllServiceCodes(user, query = {}) {
+    const filter = {};
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    // Optional: Filter by isActive if provided
+    if (query.isActive !== undefined) {
+      filter.isActive = query.isActive === "true" || query.isActive === true;
+    }
+
+    const codes = await ServiceCode.find(filter)
+      .sort({ sortOrder: 1, code: 1 }) // Sort by sortOrder first, then by code
+      .lean();
 
     return codes.map((code) => ({
       id: code._id.toString(),
       code: code.code,
       name: code.name,
-      description: code.description,
-      vehicleClass: code.vehicleClass,
-      body: code.body,
-      pallets: code.pallets,
-      features: code.features,
-      isActive: code.isActive,
-      createdAt: code.createdAt,
+      vehicleClass: code.vehicleClass || null,
+      body: code.body || null,
+      pallets: code.pallets || null,
+      features: code.features || null,
+      isActive: code.isActive !== undefined ? code.isActive : true,
+      sortOrder: code.sortOrder || null,
+      createdAt: code.createdAt ? code.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: code.updatedAt ? code.updatedAt.toISOString() : new Date().toISOString(),
     }));
   }
 
-  static async createServiceCode(data) {
-    const code = await ServiceCode.create(data);
+  static async createServiceCode(data, user) {
+    const { code, name, vehicleClass, body, pallets, features, sortOrder } = data;
+
+    // Validate required fields
+    if (!code || !name) {
+      throw new AppError(
+        "code and name are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const trimmedCode = code.trim();
+    const trimmedName = name.trim();
+
+    if (!trimmedCode || !trimmedName) {
+      throw new AppError(
+        "code and name cannot be empty",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Check for duplicate code within organization
+    const filter = {
+      code: trimmedCode,
+    };
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    const existingCode = await ServiceCode.findOne(filter);
+
+    if (existingCode) {
+      throw new AppError(
+        "A service code with this code already exists",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create new service code
+    const newServiceCode = await ServiceCode.create({
+      code: trimmedCode,
+      name: trimmedName,
+      vehicleClass: vehicleClass ? vehicleClass.trim() : null,
+      body: body ? body.trim() : null,
+      pallets: pallets ? pallets.trim() : null,
+      features: features ? features.trim() : null,
+      isActive: true,
+      sortOrder: sortOrder !== undefined ? sortOrder : null,
+      organizationId: user.activeOrganizationId || null,
+    });
 
     return {
-      success: true,
-      message: "Service code created successfully",
-      serviceCode: code.toObject(),
+      id: newServiceCode._id.toString(),
+      code: newServiceCode.code,
+      name: newServiceCode.name,
+      vehicleClass: newServiceCode.vehicleClass || null,
+      body: newServiceCode.body || null,
+      pallets: newServiceCode.pallets || null,
+      features: newServiceCode.features || null,
+      isActive: newServiceCode.isActive,
+      sortOrder: newServiceCode.sortOrder || null,
+      createdAt: newServiceCode.createdAt.toISOString(),
+      updatedAt: newServiceCode.updatedAt.toISOString(),
     };
   }
 
-  static async updateServiceCode(codeId, data) {
+  static async updateServiceCode(codeId, data, user) {
     const code = await ServiceCode.findById(codeId);
     if (!code) {
       throw new AppError("Service code not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    Object.assign(code, data);
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      code.organizationId &&
+      code.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to this service code",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // If code is being changed, check for duplicates
+    if (data.code && data.code.trim() !== code.code) {
+      const trimmedCode = data.code.trim();
+      const filter = {
+        code: trimmedCode,
+      };
+
+      // Multi-tenant: Filter by organization if not super admin
+      if (!user.isSuperAdmin && user.activeOrganizationId) {
+        filter.organizationId = user.activeOrganizationId;
+      }
+
+      const existingCode = await ServiceCode.findOne({
+        ...filter,
+        _id: { $ne: codeId },
+      });
+
+      if (existingCode) {
+        throw new AppError(
+          "A service code with this code already exists",
+          HttpStatusCodes.CONFLICT
+        );
+      }
+    }
+
+    // Update only provided fields
+    if (data.code !== undefined) code.code = data.code.trim();
+    if (data.name !== undefined) code.name = data.name.trim();
+    if (data.vehicleClass !== undefined)
+      code.vehicleClass = data.vehicleClass ? data.vehicleClass.trim() : null;
+    if (data.body !== undefined) code.body = data.body ? data.body.trim() : null;
+    if (data.pallets !== undefined)
+      code.pallets = data.pallets ? data.pallets.trim() : null;
+    if (data.features !== undefined)
+      code.features = data.features ? data.features.trim() : null;
+    if (data.isActive !== undefined) code.isActive = data.isActive;
+    if (data.sortOrder !== undefined) code.sortOrder = data.sortOrder;
+
     await code.save();
 
     return {
-      success: true,
-      message: "Service code updated successfully",
-      serviceCode: code.toObject(),
+      id: code._id.toString(),
+      code: code.code,
+      name: code.name,
+      vehicleClass: code.vehicleClass || null,
+      body: code.body || null,
+      pallets: code.pallets || null,
+      features: code.features || null,
+      isActive: code.isActive,
+      sortOrder: code.sortOrder || null,
+      createdAt: code.createdAt.toISOString(),
+      updatedAt: code.updatedAt.toISOString(),
     };
   }
 
-  static async deleteServiceCode(codeId) {
+  static async deleteServiceCode(codeId, user) {
     const code = await ServiceCode.findById(codeId);
     if (!code) {
       throw new AppError("Service code not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      code.organizationId &&
+      code.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to this service code",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Optional: Check if service code is referenced by rates
+    const RateCard = require("../models/rateCard.model");
+    const DriverRate = require("../models/driverRate.model");
+
+    const referencedRates = await RateCard.countDocuments({
+      serviceCode: code.code,
+    });
+
+    const referencedDriverRates = await DriverRate.countDocuments({
+      serviceCode: code.code,
+    });
+
+    if (referencedRates > 0 || referencedDriverRates > 0) {
+      const totalReferences = referencedRates + referencedDriverRates;
+      throw new AppError(
+        `Cannot delete service code: it is referenced by ${totalReferences} rate(s)`,
+        HttpStatusCodes.CONFLICT
+      );
     }
 
     await ServiceCode.findByIdAndDelete(codeId);
@@ -3293,53 +4102,257 @@ class MasterDataService {
 
   // ==================== ANCILLARIES ====================
 
-  static async getAllAncillaries() {
-    const ancillaries = await Ancillary.find().sort({ code: 1 }).lean();
+  static async getAllAncillaries(user, query = {}) {
+    const filter = {};
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    // Optional: Filter by isActive if provided
+    if (query.isActive !== undefined) {
+      filter.isActive = query.isActive === "true" || query.isActive === true;
+    }
+
+    const ancillaries = await Ancillary.find(filter)
+      .sort({ sortOrder: 1, code: 1 }) // Sort by sortOrder first, then by code
+      .lean();
 
     return ancillaries.map((ancillary) => ({
       id: ancillary._id.toString(),
       code: ancillary.code,
       name: ancillary.name,
-      description: ancillary.description,
-      rateType: ancillary.rateType,
-      rate: ancillary.rate,
-      unit: ancillary.unit,
-      isActive: ancillary.isActive,
-      createdAt: ancillary.createdAt,
+      description: ancillary.description || null,
+      category: ancillary.category || null,
+      defaultUnit: ancillary.defaultUnit || null,
+      isActive: ancillary.isActive !== undefined ? ancillary.isActive : true,
+      sortOrder: ancillary.sortOrder || null,
+      createdAt: ancillary.createdAt ? ancillary.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: ancillary.updatedAt ? ancillary.updatedAt.toISOString() : new Date().toISOString(),
     }));
   }
 
-  static async createAncillary(data) {
-    const ancillary = await Ancillary.create(data);
+  static async createAncillary(data, user) {
+    const { code, name, description, category, defaultUnit, isActive, sortOrder } = data;
+
+    // Validate required fields
+    if (!code || !name) {
+      throw new AppError(
+        "code and name are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const trimmedCode = code.trim();
+    const trimmedName = name.trim();
+
+    if (!trimmedCode || !trimmedName) {
+      throw new AppError(
+        "code and name cannot be empty",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate code length (max 20 characters)
+    if (trimmedCode.length > 20) {
+      throw new AppError(
+        "code must be 20 characters or less",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate category if provided
+    const validCategories = ["TRAVEL", "WAITING", "SURCHARGE", "TOLL", "DEMURRAGE"];
+    if (category && !validCategories.includes(category)) {
+      throw new AppError(
+        `category must be one of: ${validCategories.join(", ")}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate defaultUnit if provided
+    const validUnits = ["HOUR", "OCCURRENCE", "KM", "EACH", "DAY"];
+    if (defaultUnit && !validUnits.includes(defaultUnit)) {
+      throw new AppError(
+        `defaultUnit must be one of: ${validUnits.join(", ")}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Check for duplicate code within organization
+    const filter = {
+      code: trimmedCode,
+    };
+
+    // Multi-tenant: Filter by organization if not super admin
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    }
+
+    const existingAncillary = await Ancillary.findOne(filter);
+
+    if (existingAncillary) {
+      throw new AppError(
+        "An ancillary with this code already exists",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create new ancillary
+    const newAncillary = await Ancillary.create({
+      code: trimmedCode,
+      name: trimmedName,
+      description: description ? description.trim() : null,
+      category: category || null,
+      defaultUnit: defaultUnit || null,
+      isActive: isActive !== undefined ? isActive : true,
+      sortOrder: sortOrder !== undefined ? sortOrder : null,
+      organizationId: user.activeOrganizationId || null,
+    });
 
     return {
-      success: true,
-      message: "Ancillary created successfully",
-      ancillary: ancillary.toObject(),
+      id: newAncillary._id.toString(),
+      code: newAncillary.code,
+      name: newAncillary.name,
+      description: newAncillary.description || null,
+      category: newAncillary.category || null,
+      defaultUnit: newAncillary.defaultUnit || null,
+      isActive: newAncillary.isActive,
+      sortOrder: newAncillary.sortOrder || null,
+      createdAt: newAncillary.createdAt.toISOString(),
+      updatedAt: newAncillary.updatedAt.toISOString(),
     };
   }
 
-  static async updateAncillary(ancillaryId, data) {
+  static async updateAncillary(ancillaryId, data, user) {
     const ancillary = await Ancillary.findById(ancillaryId);
     if (!ancillary) {
       throw new AppError("Ancillary not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    Object.assign(ancillary, data);
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      ancillary.organizationId &&
+      ancillary.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to this ancillary",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // If code is being changed, check for duplicates and validate length
+    if (data.code && data.code.trim() !== ancillary.code) {
+      const trimmedCode = data.code.trim();
+
+      if (trimmedCode.length > 20) {
+        throw new AppError(
+          "code must be 20 characters or less",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      const filter = {
+        code: trimmedCode,
+      };
+
+      // Multi-tenant: Filter by organization if not super admin
+      if (!user.isSuperAdmin && user.activeOrganizationId) {
+        filter.organizationId = user.activeOrganizationId;
+      }
+
+      const existingAncillary = await Ancillary.findOne({
+        ...filter,
+        _id: { $ne: ancillaryId },
+      });
+
+      if (existingAncillary) {
+        throw new AppError(
+          "An ancillary with this code already exists",
+          HttpStatusCodes.CONFLICT
+        );
+      }
+    }
+
+    // Validate category if provided
+    const validCategories = ["TRAVEL", "WAITING", "SURCHARGE", "TOLL", "DEMURRAGE"];
+    if (data.category && !validCategories.includes(data.category)) {
+      throw new AppError(
+        `category must be one of: ${validCategories.join(", ")}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate defaultUnit if provided
+    const validUnits = ["HOUR", "OCCURRENCE", "KM", "EACH", "DAY"];
+    if (data.defaultUnit && !validUnits.includes(data.defaultUnit)) {
+      throw new AppError(
+        `defaultUnit must be one of: ${validUnits.join(", ")}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Update only provided fields
+    if (data.code !== undefined) ancillary.code = data.code.trim();
+    if (data.name !== undefined) ancillary.name = data.name.trim();
+    if (data.description !== undefined)
+      ancillary.description = data.description ? data.description.trim() : null;
+    if (data.category !== undefined) ancillary.category = data.category || null;
+    if (data.defaultUnit !== undefined) ancillary.defaultUnit = data.defaultUnit || null;
+    if (data.isActive !== undefined) ancillary.isActive = data.isActive;
+    if (data.sortOrder !== undefined) ancillary.sortOrder = data.sortOrder;
+
     await ancillary.save();
 
     return {
-      success: true,
-      message: "Ancillary updated successfully",
-      ancillary: ancillary.toObject(),
+      id: ancillary._id.toString(),
+      code: ancillary.code,
+      name: ancillary.name,
+      description: ancillary.description || null,
+      category: ancillary.category || null,
+      defaultUnit: ancillary.defaultUnit || null,
+      isActive: ancillary.isActive,
+      sortOrder: ancillary.sortOrder || null,
+      createdAt: ancillary.createdAt.toISOString(),
+      updatedAt: ancillary.updatedAt.toISOString(),
     };
   }
 
-  static async deleteAncillary(ancillaryId) {
+  static async deleteAncillary(ancillaryId, user) {
     const ancillary = await Ancillary.findById(ancillaryId);
     if (!ancillary) {
       throw new AppError("Ancillary not found.", HttpStatusCodes.NOT_FOUND);
     }
+
+    // Check organization access (multi-tenant)
+    if (
+      !user.isSuperAdmin &&
+      user.activeOrganizationId &&
+      ancillary.organizationId &&
+      ancillary.organizationId.toString() !== user.activeOrganizationId.toString()
+    ) {
+      throw new AppError(
+        "Access denied to this ancillary",
+        HttpStatusCodes.FORBIDDEN
+      );
+    }
+
+    // Optional: Check if ancillary is referenced by jobs or rate cards
+    // Note: This depends on your job/rate card structure
+    // For now, we'll skip this check, but you can add it if needed:
+    // const Job = require("../models/job.model");
+    // const referencedJobs = await Job.countDocuments({
+    //   "ancillaryCharges.code": ancillary.code,
+    // });
+    // if (referencedJobs > 0) {
+    //   throw new AppError(
+    //     `Cannot delete ancillary: it is referenced by ${referencedJobs} job(s)`,
+    //     HttpStatusCodes.CONFLICT
+    //   );
+    // }
 
     await Ancillary.findByIdAndDelete(ancillaryId);
 
@@ -4113,7 +5126,6 @@ class MasterDataService {
 
   static async getRCTILogs(query, user) {
     const RCTILog = require("../models/rctiLog.model");
-    const Driver = require("../models/driver.model");
     const { driverId } = query;
 
     // Build query
@@ -4125,8 +5137,9 @@ class MasterDataService {
     }
 
     // Multi-tenant: Filter by organization if not super admin
-    // Note: RCTI logs don't have organizationId directly, so we filter through drivers
-    // For now, we'll return all logs (organization filtering can be added later when drivers have organizationId)
+    if (!user.isSuperAdmin && user.activeOrganizationId) {
+      queryObj.organizationId = user.activeOrganizationId;
+    }
 
     // Get RCTI logs
     const logs = await RCTILog.find(queryObj)
@@ -4211,6 +5224,7 @@ class MasterDataService {
 
     let sentCount = 0;
     let errorCount = 0;
+    let totalProcessed = 0; // Count of eligible drivers processed
     const logs = [];
 
     // Process each driver
@@ -4222,6 +5236,9 @@ class MasterDataService {
       if (!driver.rctiAgreementAccepted || !driver.gstRegistered) {
         continue; // Skip drivers who haven't accepted RCTI agreement or aren't GST registered
       }
+
+      // Increment total processed count (only eligible drivers)
+      totalProcessed++;
 
       let rctiLog = null;
 
@@ -4243,6 +5260,10 @@ class MasterDataService {
             ? `${party.firstName} ${party.lastName}`.trim()
             : party.companyName || party.contactName || "Driver";
 
+        // Get organization ID for multi-tenancy
+        const organizationId =
+          payRun.organizationId || user.activeOrganizationId || null;
+
         // Create RCTI log record
         rctiLog = await RCTILog.create({
           driverId: driver._id,
@@ -4260,6 +5281,7 @@ class MasterDataService {
             ? payRunDriver.totalAmount.toString()
             : "0.00",
           errorMessage: null,
+          organizationId: organizationId,
         });
 
         // Generate RCTI PDF (placeholder - implement PDF generation)
@@ -4323,7 +5345,7 @@ class MasterDataService {
       success: true,
       message: "RCTIs sent successfully",
       sentCount: sentCount,
-      totaldrivers: payRunDrivers.length,
+      totaldrivers: totalProcessed, // Total eligible drivers processed
       errorCount: errorCount,
       logs: logs,
     };
@@ -4334,12 +5356,18 @@ class MasterDataService {
     const year = new Date().getFullYear();
     const prefix = `RCTI-${year}-`;
 
-    // Get the last RCTI number for this year and organization
-    // Note: For now, we'll generate globally unique numbers
-    // In production, you might want to filter by organizationId if added to RCTILog model
-    const lastLog = await RCTILog.findOne({
+    // Build query to find last RCTI number for this year and organization
+    const query = {
       rctiNumber: { $regex: `^${prefix}` },
-    })
+    };
+
+    // Filter by organization if provided (for multi-tenancy)
+    if (organizationId) {
+      query.organizationId = organizationId;
+    }
+
+    // Get the last RCTI number for this year and organization
+    const lastLog = await RCTILog.findOne(query)
       .sort({ createdAt: -1 })
       .lean();
 
@@ -4355,6 +5383,83 @@ class MasterDataService {
     }
 
     return `${prefix}${sequence.toString().padStart(3, "0")}`;
+  }
+
+  // ==================== DRIVER UPLOADS ====================
+
+  static async getDriverUploads(driverId, user) {
+    const Driver = require("../models/driver.model");
+    const DriverDocument = require("../models/driverDocument.model");
+    const AppError = require("../utils/AppError");
+    const HttpStatusCodes = require("../enums/httpStatusCode");
+
+    // Verify driver exists
+    const driver = await Driver.findById(driverId);
+    if (!driver) {
+      throw new AppError("Driver not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Check organization access (multi-tenant)
+    // Note: Drivers don't have organizationId directly, so we'll allow access for now
+    // In production, you might want to add organizationId to Driver model or filter through UserOrganization
+
+    // Map documentType to policyType
+    const documentTypeToPolicyType = {
+      LICENSE_FRONT: "drivers-licence",
+      LICENSE_BACK: "drivers-licence",
+      MOTOR_INSURANCE: "motor-insurance",
+      MARINE_CARGO_INSURANCE: "marine-cargo-insurance",
+      PUBLIC_LIABILITY: "public-liability-insurance",
+      WORKERS_COMP: "workers-compensation",
+      POLICE_CHECK: "police-check",
+    };
+
+    // Get driver documents using the driver's ObjectId for consistency
+    // Documents may have been stored with driver._id (ObjectId) or driverId (string)
+    // Try both formats to ensure we get all documents
+    let documents = await DriverDocument.find({ 
+      $or: [
+        { driverId: driver._id }, // ObjectId format (from induction form)
+        { driverId: driverId }, // String format (from upload endpoint)
+      ]
+    })
+      .populate("reviewedBy", "fullName email")
+      .sort({ uploadedAt: -1, createdAt: -1 }) // Sort by uploadedAt, fallback to createdAt
+      .lean();
+    
+    // If no documents found, try a more flexible query
+    if (documents.length === 0) {
+      documents = await DriverDocument.find({
+        driverId: { $in: [driver._id, driverId, driver._id.toString()] }
+      })
+        .populate("reviewedBy", "fullName email")
+        .sort({ uploadedAt: -1, createdAt: -1 })
+        .lean();
+    }
+
+    // Format response
+    return documents.map((doc) => {
+      const policyType =
+        documentTypeToPolicyType[doc.documentType] || doc.documentType.toLowerCase().replace(/_/g, "-");
+
+      return {
+        id: doc._id.toString(),
+        driverId: doc.driverId ? doc.driverId.toString() : driverId,
+        policyType: policyType,
+        documentUrl: doc.fileUrl || doc.documentUrl || "",
+        status: doc.status || "PENDING",
+        uploadedAt: doc.uploadedAt 
+          ? doc.uploadedAt.toISOString() 
+          : (doc.createdAt ? doc.createdAt.toISOString() : new Date().toISOString()),
+        reviewedAt: doc.reviewedAt ? doc.reviewedAt.toISOString() : null,
+        reviewedBy: doc.reviewedBy 
+          ? (doc.reviewedBy._id ? doc.reviewedBy._id.toString() : doc.reviewedBy.toString())
+          : null,
+        fileName: doc.fileName || "unknown",
+        fileSize: doc.fileSize || 0,
+        mimeType: doc.mimeType || "application/octet-stream",
+      };
+    });
   }
 }
 

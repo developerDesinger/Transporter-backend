@@ -640,6 +640,51 @@ router.post(
   MasterDataController.copyHourlyRatesToDriverPay
 );
 
+// ==================== HOURLY HOUSE RATES ====================
+router.get(
+  "/hourly-house-rates",
+  requirePermission("master_data.view"),
+  MasterDataController.getAllHourlyHouseRates
+);
+
+router.patch(
+  "/hourly-house-rates/:id",
+  requirePermission("master_data.manage"),
+  MasterDataController.updateHourlyHouseRate
+);
+
+router.delete(
+  "/hourly-house-rates/:id",
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteHourlyHouseRate
+);
+
+// ==================== FTL HOUSE RATES ====================
+router.get(
+  "/ftl-house-rates",
+  requirePermission("master_data.view"),
+  MasterDataController.getFtlHouseRates
+);
+
+router.patch(
+  "/ftl-house-rates/:id",
+  requirePermission("master_data.manage"),
+  MasterDataController.updateFtlHouseRate
+);
+
+router.delete(
+  "/ftl-house-rates/:id",
+  requirePermission("master_data.manage"),
+  MasterDataController.deleteFtlHouseRate
+);
+
+router.post(
+  "/ftl-house-rates/upload",
+  requirePermission("master_data.manage"),
+  csvUpload.single("file"),
+  MasterDataController.uploadFtlHouseRates
+);
+
 // ==================== FUEL LEVIES ====================
 router.get(
   "/fuel-levies",

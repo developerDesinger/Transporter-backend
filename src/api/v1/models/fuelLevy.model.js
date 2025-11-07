@@ -2,37 +2,62 @@ const mongoose = require("mongoose");
 
 const FuelLevySchema = new mongoose.Schema(
   {
-    rateType: {
-      type: String,
-      enum: ["HOURLY", "FTL"],
+    version: {
+      type: Number,
       required: true,
       index: true,
     },
-    percentage: {
-      type: Number,
-      required: false,
+    metroPct: {
+      type: String,
+      required: true, // Metro/Local fuel levy percentage (e.g., "5.25")
+    },
+    interstatePct: {
+      type: String,
+      required: true, // Interstate/FTL fuel levy percentage (e.g., "10.15")
     },
     effectiveFrom: {
       type: Date,
       required: true,
-      default: Date.now,
       index: true,
     },
     effectiveTo: {
       type: Date,
+      default: null, // null = current active fuel levy
+      index: true,
+    },
+    notes: {
+      type: String,
       default: null,
     },
-    isActive: {
-      type: Boolean,
-      default: true,
+    pegDateFuelPrice: {
+      type: String,
+      default: null, // Fuel price at peg date (A in formula)
+    },
+    newRefFuelPrice: {
+      type: String,
+      default: null, // Fuel price at new reference period (B in formula)
+    },
+    lineHaulWeighting: {
+      type: String,
+      default: null, // Line haul weighting factor (C for interstate)
+    },
+    localWeighting: {
+      type: String,
+      default: null, // Local weighting factor (C for metro)
+    },
+    // Multi-tenant support
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
       index: true,
     },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
 
-// Compound index for rateType and isActive lookups
-FuelLevySchema.index({ rateType: 1, isActive: 1, effectiveFrom: -1 });
+// Compound indexes
+FuelLevySchema.index({ organizationId: 1, version: 1 }); // Unique version per organization
+FuelLevySchema.index({ organizationId: 1, effectiveTo: 1 }); // For current fuel levy lookup
 
 module.exports = mongoose.model("FuelLevy", FuelLevySchema);
 

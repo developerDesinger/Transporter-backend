@@ -62,6 +62,12 @@ const RCTILogSchema = new mongoose.Schema(
       type: String,
       default: null,
     }, // Error message if status is "failed"
+    // Multi-tenant support
+    organizationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      index: true,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
@@ -70,7 +76,8 @@ const RCTILogSchema = new mongoose.Schema(
 RCTILogSchema.index({ driverId: 1, sentAt: -1 });
 RCTILogSchema.index({ payrunId: 1, sentAt: -1 });
 RCTILogSchema.index({ status: 1, sentAt: -1 });
-RCTILogSchema.index({ rctiNumber: 1 }); // Already unique, but explicit index
+RCTILogSchema.index({ organizationId: 1, sentAt: -1 }); // Multi-tenant filtering
+RCTILogSchema.index({ organizationId: 1, rctiNumber: 1 }); // Unique RCTI numbers per organization
 
 // Virtual to populate driver
 RCTILogSchema.virtual("driver", {
