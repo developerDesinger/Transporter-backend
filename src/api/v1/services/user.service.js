@@ -11,6 +11,22 @@ const { formatUserWithRBAC, formatUsersWithRBAC } = require("../utils/userRBACFo
 const { getPermissionsForRole } = require("../utils/permissions");
 const UserOrganization = require("../models/userOrganization.model");
 
+const DRIVER_PORTAL_PERMISSIONS = [
+  "driver.portal.view",
+  "operations.dashboard.view",
+  "driver.messages.view",
+  "driver.messages.send",
+  "driver.daily-board.view",
+  "driver.induction.manage",
+];
+
+const ensureDriverPermissions = (existingPermissions = []) => {
+  const current = Array.isArray(existingPermissions)
+    ? existingPermissions
+    : [];
+  return Array.from(new Set([...current, ...DRIVER_PORTAL_PERMISSIONS]));
+};
+
 class UserService {
   static async createUser(data, isAdminCreation = false) {
     const { email, fullName, profilePhoto, role, password, userName } = data;
@@ -309,16 +325,65 @@ class UserService {
     // Format user with RBAC data
     const formattedUser = await formatUserWithRBAC(user);
 
+    // If user is a DRIVER, fetch and include driver status information
+    let driverStatus = null;
+    if (user.role === "DRIVER") {
+      try {
+        const Driver = require("../models/driver.model");
+        const Party = require("../models/party.model");
+        
+        // Try to find driver by userId first
+        let driver = await Driver.findOne({ userId: user._id })
+          .select("driverStatus complianceStatus isActive userId")
+          .lean();
+
+        // If not found by userId, try to find by email via party
+        if (!driver) {
+          const party = await Party.findOne({ email: user.email }).select("_id").lean();
+          if (party) {
+            driver = await Driver.findOne({ partyId: party._id })
+              .select("driverStatus complianceStatus isActive userId")
+              .lean();
+            
+            // If found by party, update the userId link for future queries
+            if (driver && !driver.userId) {
+              await Driver.updateOne(
+                { _id: driver._id },
+                { $set: { userId: user._id } }
+              );
+              console.log(`✅ Linked driver ${driver._id} to user ${user._id} during login`);
+            }
+          }
+        }
+
+        if (driver) {
+          driverStatus = {
+            driverStatus: driver.driverStatus || null,
+            complianceStatus: driver.complianceStatus || null,
+            isActive: driver.isActive || false,
+          };
+          console.log(`✅ Driver status fetched for login: ${JSON.stringify(driverStatus)}`);
+        } else {
+          console.warn(`⚠️ No driver record found for user ${user._id} (${user.email})`);
+        }
+      } catch (driverError) {
+        console.error("Error fetching driver status during login:", driverError);
+        // Continue without driver status if there's an error
+      }
+    }
+
     const token = createJwtToken({ id: user.id, role: user.role });
     return {
       message: "Login successful.",
       success: true,
       data: {
-      token,
+        token,
         user: formattedUser,
+        driverStatus, // Include driver status if user is a DRIVER
       },
       user: formattedUser, // Keep for backward compatibility
       token, // Keep for backward compatibility
+      driverStatus, // Include driver status if user is a DRIVER (for backward compatibility)
     };
   }
 
@@ -370,16 +435,40 @@ class UserService {
     // Format user with RBAC data
     const formattedUser = await formatUserWithRBAC(user);
 
+    // If user is a DRIVER, fetch and include driver status information
+    let driverStatus = null;
+    if (user.role === "DRIVER") {
+      try {
+        const Driver = require("../models/driver.model");
+        const driver = await Driver.findOne({ userId: user._id })
+          .select("driverStatus complianceStatus isActive")
+          .lean();
+
+        if (driver) {
+          driverStatus = {
+            driverStatus: driver.driverStatus || null,
+            complianceStatus: driver.complianceStatus || null,
+            isActive: driver.isActive || false,
+          };
+        }
+      } catch (driverError) {
+        console.error("Error fetching driver status during social login:", driverError);
+        // Continue without driver status if there's an error
+      }
+    }
+
     const token = createJwtToken({ id: user.id, role: user.role });
     return {
       message: "Social login successful.",
       success: true,
       data: {
-      token,
+        token,
         user: formattedUser,
+        driverStatus, // Include driver status if user is a DRIVER
       },
       user: formattedUser, // Keep for backward compatibility
       token, // Keep for backward compatibility
+      driverStatus, // Include driver status if user is a DRIVER (for backward compatibility)
     };
   }
 
@@ -947,6 +1036,11 @@ class UserService {
       );
     }
 
+    // If approving a DRIVER, handle driver-specific approval flow
+    if (assignedRole === "DRIVER") {
+      return await this.approveDriverApplication(userId, superAdminId);
+    }
+
     // Update user: approve and assign role
     const updatedUser = await User.findByIdAndUpdate(
       userId,
@@ -967,6 +1061,118 @@ class UserService {
       message: "User approved successfully.",
       success: true,
       user: formattedUser,
+    };
+  }
+
+  /**
+   * Approve driver application (Driver Requests)
+   * Creates user account with default password and updates driver status to NEW_RECRUIT
+   * @param {string} userId - User ID
+   * @param {string} superAdminId - Admin ID approving the driver
+   * @returns {Object} User and driver objects
+   */
+  static async approveDriverApplication(userId, superAdminId) {
+    const Driver = require("../models/driver.model");
+    const Party = require("../models/party.model");
+    const bcrypt = require("bcrypt");
+    const { sendDriverInductionApprovedEmail } = require("../utils/email");
+
+    // Find user
+    const user = await User.findById(userId);
+    if (!user) {
+      throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Find driver record
+    const driver = await Driver.findOne({ userId: user._id }).populate("party");
+    if (!driver) {
+      throw new AppError(
+        "Driver record not found. Cannot approve driver application.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Verify driver is in PENDING_RECRUIT status
+    if (driver.driverStatus !== "PENDING_RECRUIT") {
+      throw new AppError(
+        `Driver is not in PENDING_RECRUIT status. Current status: ${driver.driverStatus}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // CRITICAL: Create/update user account with default password
+    const defaultPassword = "123456";
+    const passwordHash = await bcrypt.hash(defaultPassword, 10);
+
+    // Get driver's email and name from party record
+    const driverEmail = driver.party?.email || user.email;
+    const driverFirstName = driver.party?.firstName || user.fullName?.split(" ")[0] || "";
+    const driverLastName = driver.party?.lastName || user.fullName?.split(" ").slice(1).join(" ") || "";
+    const driverFullName = `${driverFirstName} ${driverLastName}`.trim() || user.fullName;
+
+    // Generate username from email if not exists
+    let username = user.userName;
+    if (!username) {
+      const emailPrefix = driverEmail.split("@")[0];
+      const randomSuffix = Math.random().toString(36).substring(7);
+      username = `${emailPrefix}_${randomSuffix}`;
+    }
+
+    // Update user account
+    user.password = passwordHash;
+    user.userName = username;
+    user.fullName = driverFullName;
+    user.name = driverFullName;
+    user.role = "DRIVER";
+    user.status = "ACTIVE";
+    user.approvalStatus = "APPROVED";
+    user.approvedBy = superAdminId;
+    user.approvedAt = new Date();
+    user.passwordChangeRequired = true;
+    user.permissions = ensureDriverPermissions(user.permissions);
+    await user.save();
+
+    // Update driver record
+    driver.driverStatus = "NEW_RECRUIT";
+    driver.complianceStatus = "PENDING_INDUCTION";
+    driver.isActive = false; // Still inactive until induction is approved
+    driver.userId = user._id; // Ensure userId is linked
+    await driver.save();
+
+    // Send approval email to driver with login credentials
+    try {
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+      await sendDriverInductionApprovedEmail({
+        email: driverEmail,
+        firstName: driverFirstName,
+        lastName: driverLastName,
+        username: username,
+        password: defaultPassword,
+        loginUrl: `${frontendUrl}/login`,
+        changePasswordUrl: `${frontendUrl}/profile`,
+        subject: "Driver Application Approved - Complete Your Induction",
+        isApplicationApproval: true, // Flag to indicate this is application approval, not induction approval
+      });
+
+      console.log(`✅ Sent approval email to driver: ${driverEmail}`);
+    } catch (emailError) {
+      console.error("Error sending approval email:", emailError);
+      // Continue even if email fails
+    }
+
+    // Format user with RBAC data
+    const formattedUser = await formatUserWithRBAC(user);
+
+    return {
+      success: true,
+      message: "Driver approved successfully",
+      user: formattedUser,
+      driver: {
+        id: driver._id.toString(),
+        driverStatus: driver.driverStatus,
+        complianceStatus: driver.complianceStatus,
+        isActive: driver.isActive,
+      },
     };
   }
 

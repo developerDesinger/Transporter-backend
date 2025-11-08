@@ -217,6 +217,87 @@ const sendDriverInductionSubmittedEmail = async (options) => {
   }
 };
 
+const sendDriverInductionApprovedEmail = async (options) => {
+  // Validate recipient email
+  if (!options.email) {
+    console.error("❌ Error: Recipient email is missing.");
+    return;
+  }
+
+  // Driver Induction Approved Email Template
+  const approvalType = options.isApplicationApproval 
+    ? "Your driver application has been approved by our team. You can now log in and complete your induction form."
+    : "Your driver induction has been approved by our team.";
+  
+  const htmlTemplate = `
+  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <img src="https://booking-bot-frontend.vercel.app/images/Group%201410088281.png" alt="Transporter.Digital Logo" style="max-width: 150px;">
+  </div>
+  <div style="background-color: #ffffff; padding: 20px;">
+    <p>Dear ${options.firstName || ""} ${options.lastName || ""},</p>
+    <p><strong>Congratulations! ${approvalType}</strong></p>
+    <p>You can now log in to the Transporter.Digital platform using the following credentials:</p>
+    <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
+      <p><strong>Email:</strong> ${options.email}</p>
+      <p><strong>Username:</strong> ${options.username || options.email}</p>
+      <p><strong>Password:</strong> ${options.password || "123456"}</p>
+    </div>
+    <p style="color: #d32f2f; font-weight: bold;">⚠️ IMPORTANT: Please change your password immediately after your first login for security purposes.</p>
+    <p style="text-align: center; margin: 30px 0;">
+      <a href="${options.loginUrl || "#"}" style="background-color: #007bff; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; margin-right: 10px;">Log In</a>
+      <a href="${options.changePasswordUrl || "#"}" style="background-color: #28a745; color: #ffffff; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Change Password</a>
+    </p>
+    ${options.isApplicationApproval ? `
+    <p><strong>Next Steps:</strong></p>
+    <ul>
+      <li>Log in using the credentials above</li>
+      <li>Complete your driver induction form</li>
+      <li>Upload all required compliance documents</li>
+      <li>Wait for staff review and approval</li>
+    </ul>
+    ` : `
+    <p>Once logged in, you will be able to:</p>
+    <ul>
+      <li>View and accept job assignments</li>
+      <li>Update your profile and documents</li>
+      <li>Access driver portal features</li>
+      <li>View your pay and invoices</li>
+    </ul>
+    `}
+    <p>If you have any questions or need assistance, please contact our support team.</p>
+    <p>Welcome aboard!</p>
+  </div>
+  <div style="background-color: #f4f4f4; padding: 20px; text-align: center;">
+    <p>For any assistance, contact us at <a href="mailto:support@transporter.digital" style="color: #007bff; text-decoration: none;">support@transporter.digital</a>.</p>
+    <p>Best regards,<br/>The Transporter.Digital Team</p>
+  </div>
+</div>
+`;
+
+  // Email options
+  const defaultSubject = options.isApplicationApproval 
+    ? "Driver Application Approved - Complete Your Induction"
+    : "Driver Induction Approved - Welcome to Transporter.Digital";
+  
+  const mailOptions = {
+    to: options.email,
+    from: "tericalomnick@gmail.com", // Must be a verified sender email in SendGrid
+    subject: options.subject || defaultSubject,
+    html: htmlTemplate,
+  };
+
+  try {
+    await sgMail.send(mailOptions);
+    console.log(`✅ Driver induction approved email sent successfully to: ${options.email}`);
+  } catch (error) {
+    console.error(
+      "❌ Error sending driver induction approved email:",
+      error.response ? error.response.body : error
+    );
+  }
+};
+
 const sendCustomerOnboardingEmail = async (options) => {
   // Validate recipient email
   if (!options.email) {
@@ -446,6 +527,7 @@ module.exports = {
   sendForgotPasswordEmail, 
   sendDriverApplicationEmail, 
   sendDriverInductionSubmittedEmail,
+  sendDriverInductionApprovedEmail,
   sendCustomerOnboardingEmail,
   sendLinkedDocumentEmail,
   sendRCTIEmail

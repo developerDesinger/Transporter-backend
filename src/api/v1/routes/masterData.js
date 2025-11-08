@@ -246,6 +246,13 @@ router.get(
   MasterDataController.getDriverById
 );
 
+router.patch(
+  "/drivers/:id/approve-induction",
+  isAuthenticated,
+  requirePermission("drivers.manage"),
+  MasterDataController.approveDriverInduction
+);
+
 router.post(
   "/drivers",
   isAuthenticated,

@@ -27,29 +27,112 @@ const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
 const mongoose = require("mongoose");
 const { uploadFileToS3 } = require("./aws.service");
-const { sendDriverApplicationEmail, sendDriverInductionSubmittedEmail, sendCustomerOnboardingEmail, sendLinkedDocumentEmail } = require("../utils/email");
+const { sendDriverApplicationEmail, sendDriverInductionSubmittedEmail, sendDriverInductionApprovedEmail, sendCustomerOnboardingEmail, sendLinkedDocumentEmail } = require("../utils/email");
 const path = require("path");
 const fs = require("fs").promises;
+
+const DRIVER_PORTAL_PERMISSIONS = [
+  "driver.portal.view",
+  "operations.dashboard.view",
+  "driver.messages.view",
+  "driver.messages.send",
+  "driver.daily-board.view",
+  "driver.induction.manage",
+];
+
+const ensureDriverPermissions = (existingPermissions = []) => {
+  const current = Array.isArray(existingPermissions)
+    ? existingPermissions
+    : [];
+  return Array.from(new Set([...current, ...DRIVER_PORTAL_PERMISSIONS]));
+};
 
 class MasterDataService {
   // ==================== DRIVERS ====================
 
-  static async getAllDrivers(query) {
+  static async getAllDrivers(query, user) {
     const filter = {};
 
-    if (query.status === "active") {
-      filter.isActive = true;
-    } else if (query.status === "inactive") {
-      filter.isActive = false;
+    // Note: Driver model doesn't have organizationId field directly
+    // Multi-tenancy can be handled through user relationship if needed
+
+    // If userId is provided, filter by userId (for drivers viewing their own data)
+    if (query.userId) {
+      // Convert string userId to ObjectId if needed
+      filter.userId = mongoose.Types.ObjectId.isValid(query.userId)
+        ? new mongoose.Types.ObjectId(query.userId)
+        : query.userId;
+    }
+
+    // Apply status filter
+    if (query.status) {
+      if (query.status === "active") {
+        filter.isActive = true;
+      } else if (query.status === "inactive") {
+        filter.isActive = false;
+      } else if (["PENDING_RECRUIT", "NEW_RECRUIT", "PENDING_INDUCTION", "COMPLIANT"].includes(query.status)) {
+        filter.driverStatus = query.status;
+      }
     }
 
     const drivers = await Driver.find(filter)
       .populate("party")
+      .populate("userId", "id email userName role status fullName")
       .sort({ createdAt: -1 })
       .lean();
 
+    // If userId was provided, return single driver or first match
+    if (query.userId) {
+      const driver = drivers.find((d) => d.userId && d.userId._id.toString() === query.userId) || drivers[0];
+      
+      if (!driver) {
+        return null; // Driver not found
+      }
+
+      return {
+        id: driver._id.toString(),
+        userId: driver.userId ? driver.userId._id.toString() : null,
+        partyId: driver.partyId ? driver.partyId.toString() : null,
+        driverStatus: driver.driverStatus || null,
+        complianceStatus: driver.complianceStatus || null,
+        isActive: driver.isActive,
+        party: driver.party
+          ? {
+              id: driver.party._id.toString(),
+              firstName: driver.party.firstName,
+              lastName: driver.party.lastName,
+              email: driver.party.email,
+              phone: driver.party.phone,
+              companyName: driver.party.companyName,
+              suburb: driver.party.suburb,
+              state: driver.party.state,
+              postcode: driver.party.postcode,
+            }
+          : null,
+        user: driver.userId
+          ? {
+              id: driver.userId._id.toString(),
+              email: driver.userId.email,
+              username: driver.userId.userName,
+              role: driver.userId.role,
+              status: driver.userId.status,
+              fullName: driver.userId.fullName,
+            }
+          : null,
+        employmentType: driver.employmentType,
+        driverCode: driver.driverCode,
+        createdAt: driver.createdAt ? driver.createdAt.toISOString() : new Date().toISOString(),
+        updatedAt: driver.updatedAt ? driver.updatedAt.toISOString() : new Date().toISOString(),
+      };
+    }
+
+    // Return all matching drivers
     return drivers.map((driver) => ({
       id: driver._id.toString(),
+      userId: driver.userId ? driver.userId._id.toString() : null,
+      partyId: driver.partyId ? driver.partyId.toString() : null,
+      driverStatus: driver.driverStatus || null,
+      complianceStatus: driver.complianceStatus || null,
       party: driver.party
         ? {
             id: driver.party._id.toString(),
@@ -63,6 +146,15 @@ class MasterDataService {
             postcode: driver.party.postcode,
           }
         : null,
+      user: driver.userId
+        ? {
+            id: driver.userId._id.toString(),
+            email: driver.userId.email,
+            username: driver.userId.userName,
+            role: driver.userId.role,
+            status: driver.userId.status,
+          }
+        : null,
       employmentType: driver.employmentType,
       isActive: driver.isActive,
       driverCode: driver.driverCode,
@@ -71,8 +163,8 @@ class MasterDataService {
       publicLiabilityExpiry: driver.publicLiabilityExpiry,
       marineCargoExpiry: driver.marineCargoExpiry,
       workersCompExpiry: driver.workersCompExpiry,
-      createdAt: driver.createdAt,
-      updatedAt: driver.updatedAt,
+      createdAt: driver.createdAt ? driver.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: driver.updatedAt ? driver.updatedAt.toISOString() : new Date().toISOString(),
     }));
   }
 
@@ -4703,6 +4795,143 @@ class MasterDataService {
       submittedAt: new Date(),
     });
 
+    // Check if user already exists
+    let user = await User.findOne({ email: data.email.toLowerCase().trim() });
+    let party = null;
+    let driver = null;
+
+    if (!user) {
+      // Create user account with temporary password
+      const passwordHash = await bcrypt.hash("changeme123", 10);
+      user = await User.create({
+        email: data.email.toLowerCase().trim(),
+        userName: data.email.split("@")[0] + Math.random().toString(36).substring(7),
+        password: passwordHash,
+        fullName: `${data.firstName} ${data.lastName}`,
+        name: `${data.firstName} ${data.lastName}`,
+        role: "DRIVER",
+        status: "PENDING_APPROVAL",
+        approvalStatus: "PENDING",
+        passwordChangeRequired: true,
+        isSuperAdmin: false,
+      });
+
+      // Create party record
+      party = await Party.create({
+        firstName: data.firstName,
+        lastName: data.lastName,
+        email: data.email.toLowerCase().trim(),
+        phone: data.phone,
+        companyName: data.companyName || null,
+        suburb: data.suburb,
+        state: data.stateRegion,
+      });
+    } else {
+      // Find or create party for existing user
+      party = await Party.findOne({ email: data.email.toLowerCase().trim() });
+      if (!party) {
+        party = await Party.create({
+          firstName: data.firstName,
+          lastName: data.lastName,
+          email: data.email.toLowerCase().trim(),
+          phone: data.phone,
+          companyName: data.companyName || null,
+          suburb: data.suburb,
+          state: data.stateRegion,
+        });
+      } else {
+        // Update party information
+        party.firstName = data.firstName;
+        party.lastName = data.lastName;
+        party.phone = data.phone;
+        party.companyName = data.companyName || party.companyName;
+        party.suburb = data.suburb || party.suburb;
+        party.state = data.stateRegion || party.state;
+        await party.save();
+      }
+    }
+
+    // CRITICAL: Find or create driver record - THIS IS CRITICAL FOR MASTER DATA
+    // The driver record MUST be created for the driver to appear in Master Data > Drivers tab
+    driver = await Driver.findOne({ userId: user._id });
+
+    if (!driver) {
+      // Generate driver code
+      const count = await Driver.countDocuments();
+      const driverCode = `DRV${String(count + 1).padStart(4, "0")}`;
+
+      // Determine employment type from contactType
+      let employmentType = "CONTRACTOR";
+      if (data.contactType) {
+        if (data.contactType.toLowerCase().includes("employee")) {
+          employmentType = "EMPLOYEE";
+        } else if (data.contactType.toLowerCase().includes("casual")) {
+          employmentType = "CASUAL";
+        }
+      }
+
+      // Create new driver record - this is what makes them appear in Master Data
+      driver = await Driver.create({
+        partyId: party._id,
+        userId: user._id,
+        driverCode,
+        employmentType,
+        isActive: false, // MUST be false for pending recruits
+        driverStatus: data.driverStatus || "PENDING_RECRUIT", // Use from request body if provided (default: PENDING_RECRUIT)
+        complianceStatus: data.complianceStatus || "PENDING_APPROVAL", // Use from request body if provided (default: PENDING_APPROVAL)
+        contactType: data.contactType,
+        servicesProvided,
+        vehicleTypesInFleet,
+        fleetSize: data.fleetSize,
+      });
+
+      console.log(`✅ Created driver record with ID: ${driver._id.toString()}, Status: ${driver.driverStatus}`);
+    } else {
+      // Handle existing driver - check if already approved/compliant
+      const isAlreadyApproved =
+        driver.driverStatus === "COMPLIANT" && driver.isActive === true;
+
+      if (isAlreadyApproved) {
+        // Driver is already approved - reject the application (Option 1: Recommended)
+        throw new AppError(
+          "You are already an approved driver. If you need to update your information, please contact support or use the driver portal.",
+          HttpStatusCodes.BAD_REQUEST
+        );
+
+        // Alternative (Option 2): Allow update but keep status
+        // driver.contactType = data.contactType || driver.contactType;
+        // driver.servicesProvided = servicesProvided;
+        // driver.vehicleTypesInFleet = vehicleTypesInFleet;
+        // driver.fleetSize = data.fleetSize || driver.fleetSize;
+        // // Keep existing status and active state
+        // await driver.save();
+        // console.log(`✅ Updated approved driver record (status preserved): ${driver._id.toString()}`);
+      } else {
+        // Driver exists but not approved - update status for re-application
+        driver.driverStatus = data.driverStatus || "PENDING_RECRUIT";
+        driver.complianceStatus = data.complianceStatus || "PENDING_APPROVAL";
+        driver.isActive = false; // Ensure inactive for pending recruits
+        driver.contactType = data.contactType || driver.contactType;
+        driver.servicesProvided = servicesProvided;
+        driver.vehicleTypesInFleet = vehicleTypesInFleet;
+        driver.fleetSize = data.fleetSize || driver.fleetSize;
+        await driver.save();
+
+        console.log(
+          `✅ Updated driver record with ID: ${driver._id.toString()}, Status: ${driver.driverStatus}`
+        );
+      }
+    }
+
+    // CRITICAL: Verify driver record was created/updated
+    if (!driver || !driver._id) {
+      console.error("❌ ERROR: Driver record was not created/updated successfully");
+      throw new AppError(
+        "Failed to create driver record. Please contact support.",
+        HttpStatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+
     // Generate secure token
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
@@ -4736,6 +4965,14 @@ class MasterDataService {
     return {
       success: true,
       message: "Application submitted successfully. Please check your email to complete the induction form.",
+      driver: driver
+        ? {
+            id: driver._id.toString(),
+            email: data.email,
+            driverStatus: driver.driverStatus,
+            complianceStatus: driver.complianceStatus,
+          }
+        : null,
       applicationId: application._id.toString(),
       email: data.email,
     };
@@ -4948,36 +5185,75 @@ class MasterDataService {
     // Parse boolean
     const gstRegistered = data.gstRegistered === "true" || data.gstRegistered === true;
 
-    // Create driver record
-    const driver = await Driver.create({
-      partyId: party._id,
-      userId: user._id,
-      driverCode,
-      employmentType,
-      isActive: false, // Inactive until admin approval
-      contactType: data.contactType || "Pending Induction",
-      complianceStatus: data.complianceStatus || "Pending Review",
-      abn: data.abn,
-      bankName: data.bankName,
-      bsb: data.bsb,
-      accountNumber: data.accountNumber,
-      accountName: data.accountName || data.fullName || `${data.firstName} ${data.lastName}`,
-      gstRegistered,
-      servicesProvided,
-      vehicleTypesInFleet,
-      fleetSize: data.fleetSize,
-      // Insurance policy numbers
-      motorInsurancePolicyNumber: data.motorInsurancePolicyNumber,
-      marineCargoInsurancePolicyNumber: data.marineCargoInsurancePolicyNumber,
-      publicLiabilityPolicyNumber: data.publicLiabilityPolicyNumber,
-      workersCompPolicyNumber: data.workersCompPolicyNumber,
-      // Expiry dates
-      licenseExpiry: parseDate(data.licenseExpiry),
-      motorInsuranceExpiry: parseDate(data.motorInsuranceExpiry),
-      marineCargoExpiry: parseDate(data.marineCargoInsuranceExpiry),
-      publicLiabilityExpiry: parseDate(data.publicLiabilityExpiry),
-      workersCompExpiry: parseDate(data.workersCompExpiry),
-    });
+    // Create or update driver record
+    let driver = await Driver.findOne({ userId: user._id });
+    
+    // Verify driver is in NEW_RECRUIT status (must be approved first)
+    if (driver && driver.driverStatus !== "NEW_RECRUIT" && driver.driverStatus !== "PENDING_INDUCTION") {
+      throw new AppError(
+        `Driver must be approved first. Current status: ${driver.driverStatus}. Please wait for admin approval.`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+    
+    if (!driver) {
+      // Create new driver record (should not happen if flow is correct, but handle gracefully)
+      driver = await Driver.create({
+        partyId: party._id,
+        userId: user._id,
+        driverCode,
+        employmentType,
+        isActive: false, // Inactive until admin approval
+        driverStatus: "PENDING_INDUCTION",
+        complianceStatus: "PENDING_REVIEW",
+        contactType: data.contactType || "Pending Induction",
+        abn: data.abn,
+        bankName: data.bankName,
+        bsb: data.bsb,
+        accountNumber: data.accountNumber,
+        accountName: data.accountName || data.fullName || `${data.firstName} ${data.lastName}`,
+        gstRegistered,
+        servicesProvided,
+        vehicleTypesInFleet,
+        fleetSize: data.fleetSize,
+        // Insurance policy numbers
+        motorInsurancePolicyNumber: data.motorInsurancePolicyNumber,
+        marineCargoInsurancePolicyNumber: data.marineCargoInsurancePolicyNumber,
+        publicLiabilityPolicyNumber: data.publicLiabilityPolicyNumber,
+        workersCompPolicyNumber: data.workersCompPolicyNumber,
+        // Expiry dates
+        licenseExpiry: parseDate(data.licenseExpiry),
+        motorInsuranceExpiry: parseDate(data.motorInsuranceExpiry),
+        marineCargoExpiry: parseDate(data.marineCargoInsuranceExpiry),
+        publicLiabilityExpiry: parseDate(data.publicLiabilityExpiry),
+        workersCompExpiry: parseDate(data.workersCompExpiry),
+      });
+    } else {
+      // Update existing driver record
+      driver.driverStatus = "PENDING_INDUCTION";
+      driver.complianceStatus = "PENDING_REVIEW";
+      driver.isActive = false;
+      driver.contactType = data.contactType || driver.contactType;
+      driver.abn = data.abn || driver.abn;
+      driver.bankName = data.bankName || driver.bankName;
+      driver.bsb = data.bsb || driver.bsb;
+      driver.accountNumber = data.accountNumber || driver.accountNumber;
+      driver.accountName = data.accountName || data.fullName || driver.accountName;
+      driver.gstRegistered = gstRegistered;
+      driver.servicesProvided = servicesProvided;
+      driver.vehicleTypesInFleet = vehicleTypesInFleet;
+      driver.fleetSize = data.fleetSize || driver.fleetSize;
+      driver.motorInsurancePolicyNumber = data.motorInsurancePolicyNumber || driver.motorInsurancePolicyNumber;
+      driver.marineCargoInsurancePolicyNumber = data.marineCargoInsurancePolicyNumber || driver.marineCargoInsurancePolicyNumber;
+      driver.publicLiabilityPolicyNumber = data.publicLiabilityPolicyNumber || driver.publicLiabilityPolicyNumber;
+      driver.workersCompPolicyNumber = data.workersCompPolicyNumber || driver.workersCompPolicyNumber;
+      driver.licenseExpiry = parseDate(data.licenseExpiry) || driver.licenseExpiry;
+      driver.motorInsuranceExpiry = parseDate(data.motorInsuranceExpiry) || driver.motorInsuranceExpiry;
+      driver.marineCargoExpiry = parseDate(data.marineCargoInsuranceExpiry) || driver.marineCargoExpiry;
+      driver.publicLiabilityExpiry = parseDate(data.publicLiabilityExpiry) || driver.publicLiabilityExpiry;
+      driver.workersCompExpiry = parseDate(data.workersCompExpiry) || driver.workersCompExpiry;
+      await driver.save();
+    }
 
     // Upload and store documents
     const documentTypes = [
@@ -5097,28 +5373,177 @@ class MasterDataService {
 
     return {
       success: true,
-      message: "Driver induction submitted successfully",
-      user: {
-        id: user._id.toString(),
-        _id: user._id.toString(),
-        email: user.email,
-        userName: user.userName,
-        fullName: user.fullName,
-        role: user.role,
-        status: user.status,
-        createdAt: user.createdAt,
-      },
+      message: "Induction submitted successfully",
       driver: {
         id: driver._id.toString(),
-        driverCode: driver.driverCode,
-        partyId: party._id.toString(),
-        employmentType: driver.employmentType,
-        isActive: driver.isActive,
-        contactType: driver.contactType,
+        driverStatus: driver.driverStatus,
         complianceStatus: driver.complianceStatus,
-        createdAt: driver.createdAt,
       },
-      documentsUploaded: uploadedDocuments.length,
+    };
+  }
+
+  /**
+   * Approve driver induction
+   * @param {string} driverId - Driver ID
+   * @param {Object} user - User object (for permissions and audit)
+   * @returns {Object} Updated driver object with user account details
+   */
+  static async approveDriverInduction(driverId, user) {
+    // Find driver with party populated
+    const driver = await Driver.findById(driverId).populate("party");
+
+    if (!driver) {
+      throw new AppError("Driver not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    if (!driver.party) {
+      throw new AppError(
+        "Driver party record not found. Cannot create user account.",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Note: Driver model doesn't have organizationId field directly
+    // Multi-tenancy can be handled through user relationship if needed
+    // For now, we'll allow access if user has permission
+
+    // Verify driver is in PENDING_INDUCTION status
+    if (driver.driverStatus !== "PENDING_INDUCTION") {
+      throw new AppError(
+        `Driver is not in PENDING_INDUCTION status. Current status: ${driver.driverStatus}`,
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // CRITICAL: Create user account if it doesn't exist
+    let driverUser = driver.userId ? await User.findById(driver.userId) : null;
+
+    if (!driverUser) {
+      // User account doesn't exist - create it now
+      const defaultPassword = "123456";
+      const passwordHash = await bcrypt.hash(defaultPassword, 10);
+
+      // Get driver's email and name from party record
+      const driverEmail = driver.party.email;
+      const driverFirstName = driver.party.firstName || "";
+      const driverLastName = driver.party.lastName || "";
+      const driverFullName = `${driverFirstName} ${driverLastName}`.trim();
+
+      if (!driverEmail) {
+        throw new AppError(
+          "Driver email is required. Please ensure party record has an email address.",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      // Generate username from email
+      const emailPrefix = driverEmail.split("@")[0];
+      const randomSuffix = Math.random().toString(36).substring(7);
+      const username = `${emailPrefix}_${randomSuffix}`;
+
+      // Create user account
+      driverUser = await User.create({
+        email: driverEmail,
+        userName: username,
+        password: passwordHash,
+        fullName: driverFullName,
+        name: driverFullName,
+        role: "DRIVER",
+        status: "ACTIVE",
+        approvalStatus: "APPROVED",
+        passwordChangeRequired: true, // Driver must change password on first login
+        isSuperAdmin: false,
+        permissions: DRIVER_PORTAL_PERMISSIONS,
+      });
+
+      // Link user to driver record
+      driver.userId = driverUser._id;
+
+      console.log(
+        `✅ Created user account for driver ${driver._id.toString()}: ${driverEmail}`
+      );
+    } else {
+      // User account exists - update it to ACTIVE
+      driverUser.status = "ACTIVE";
+      driverUser.passwordChangeRequired = true; // Ensure password change is required
+      driverUser.permissions = ensureDriverPermissions(driverUser.permissions);
+      await driverUser.save();
+
+      // Ensure userId is linked
+      if (!driver.userId) {
+        driver.userId = driverUser._id;
+      }
+
+      console.log(
+        `✅ Updated existing user account for driver ${driver._id.toString()}: ${driverUser.email}`
+      );
+    }
+
+    // Update driver status
+    driver.driverStatus = "COMPLIANT";
+    driver.complianceStatus = "COMPLIANT";
+    driver.isActive = true;
+    driver.approvedAt = new Date();
+    driver.approvedBy = user.id;
+    driver.userId = driverUser._id; // Ensure userId is always linked
+    await driver.save();
+
+    // Verify driver status was saved correctly (will be reflected in login response)
+    // Reload from database to confirm the save
+    const savedDriver = await Driver.findById(driver._id)
+      .select("driverStatus complianceStatus isActive userId")
+      .lean();
+    
+    console.log(
+      `✅ Driver induction approved - Status updated: driverStatus=${savedDriver.driverStatus}, complianceStatus=${savedDriver.complianceStatus}, isActive=${savedDriver.isActive}`
+    );
+    console.log(
+      `✅ Driver userId linked: ${savedDriver.userId?.toString() || 'NOT LINKED'} (will be included in login response for userId: ${driverUser._id.toString()})`
+    );
+    
+    // Verify the status was actually saved
+    if (savedDriver.driverStatus !== "COMPLIANT" || savedDriver.complianceStatus !== "COMPLIANT" || !savedDriver.isActive) {
+      console.error(`❌ ERROR: Driver status was not saved correctly! Expected COMPLIANT/COMPLIANT/true, got ${savedDriver.driverStatus}/${savedDriver.complianceStatus}/${savedDriver.isActive}`);
+    }
+
+    // Send approval email to driver with login credentials
+    try {
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+      
+      await sendDriverInductionApprovedEmail({
+        email: driver.party.email,
+        firstName: driver.party.firstName || "",
+        lastName: driver.party.lastName || "",
+        username: driverUser.userName,
+        password: "123456", // Default password - driver should change on first login
+        loginUrl: `${frontendUrl}/login`,
+        changePasswordUrl: `${frontendUrl}/profile`,
+      });
+
+      console.log(`✅ Sent approval email to driver: ${driver.party.email}`);
+    } catch (emailError) {
+      console.error("Error sending approval email:", emailError);
+      // Continue even if email fails
+    }
+
+    return {
+      success: true,
+      message: "Driver induction approved successfully. User account created/activated.",
+      driver: {
+        id: driver._id.toString(),
+        driverStatus: driver.driverStatus,
+        complianceStatus: driver.complianceStatus,
+        isActive: driver.isActive,
+      },
+      user: {
+        id: driverUser._id.toString(),
+        email: driverUser.email,
+        username: driverUser.userName,
+        status: driverUser.status,
+        passwordChangeRequired: driverUser.passwordChangeRequired,
+      },
+      // Note: Password is NOT returned in response for security
+      // Password (123456) is sent via email only
     };
   }
 

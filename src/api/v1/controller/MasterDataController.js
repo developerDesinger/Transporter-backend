@@ -4,7 +4,13 @@ const catchAsyncHandler = require("../utils/catchAsyncHandler");
 class MasterDataController {
   // ==================== DRIVERS ====================
   static getAllDrivers = catchAsyncHandler(async (req, res) => {
-    const drivers = await MasterDataService.getAllDrivers(req.query);
+    const drivers = await MasterDataService.getAllDrivers(req.query, req.user);
+    
+    // If userId was provided and driver not found, return 404
+    if (req.query.userId && !drivers) {
+      return res.status(404).json({ message: "Driver not found" });
+    }
+    
     return res.status(200).json(drivers);
   });
 
@@ -683,6 +689,12 @@ class MasterDataController {
       }
       throw error; // Re-throw to be handled by global error handler
     }
+  });
+
+  static approveDriverInduction = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.approveDriverInduction(id, req.user);
+    return res.status(200).json(result);
   });
 
   // ==================== HOURLY HOUSE RATES ====================

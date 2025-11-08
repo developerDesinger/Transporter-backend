@@ -20,7 +20,26 @@ const DriverSchema = new mongoose.Schema(
       enum: ["EMPLOYEE", "CONTRACTOR", "CASUAL"],
       default: "CONTRACTOR",
     },
-    isActive: { type: Boolean, default: true, index: true },
+    isActive: { type: Boolean, default: false, index: true }, // Default false for new recruits
+    // Driver onboarding status fields
+    driverStatus: {
+      type: String,
+      enum: ["PENDING_RECRUIT", "NEW_RECRUIT", "PENDING_INDUCTION", "COMPLIANT", null],
+      default: null,
+      index: true,
+    },
+    complianceStatus: {
+      type: String,
+      enum: ["PENDING_APPROVAL", "PENDING_INDUCTION", "PENDING_REVIEW", "COMPLIANT", null],
+      default: null,
+      index: true,
+    },
+    approvedAt: { type: Date, default: null },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     // Compliance expiry dates
     licenseExpiry: { type: Date },
     licenseDocumentFront: { type: String, default: null },
@@ -33,6 +52,7 @@ const DriverSchema = new mongoose.Schema(
     marineCargoInsuranceDocument: { type: String, default: null },
     workersCompExpiry: { type: Date },
     workersCompDocument: { type: String, default: null },
+    policeCheckDocument: { type: String, default: null },
     // Driver Portal fields
     abn: { type: String },
     bankName: { type: String },
@@ -41,7 +61,6 @@ const DriverSchema = new mongoose.Schema(
     accountName: { type: String },
     servicesProvided: [{ type: String }],
     contactType: { type: String },
-    complianceStatus: { type: String, default: "Pending Review" },
     vehicleTypesInFleet: [{ type: String }],
     fleetSize: { type: String },
     gstRegistered: { type: Boolean, default: false },
