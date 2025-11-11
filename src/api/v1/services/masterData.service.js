@@ -5018,15 +5018,6 @@ class MasterDataService {
     // Validation
     const errors = [];
 
-    // Email uniqueness check (only if creating new user)
-    const existingUser = await User.findOne({ email: data.email });
-    if (existingUser && existingUser.status !== "PENDING_INDUCTION") {
-      errors.push({
-        field: "email",
-        message: "Email already registered",
-      });
-    }
-
     // Username uniqueness check
     if (data.username) {
       const existingUsername = await User.findOne({ userName: data.username });
@@ -5115,24 +5106,47 @@ class MasterDataService {
       10
     );
 
-    // Create or update user account
-    let user = existingUser;
-    if (!user || user.status === "PENDING_INDUCTION") {
+    // ⚠️ CRITICAL: Create or update user account
+    // If userId is provided (from authenticated request), use that user
+    let user = null;
+    if (data.userId) {
+      user = await User.findById(data.userId);
+      if (!user) {
+        throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+      }
+      // Update user if needed (but don't change password if already set)
+      if (data.fullName || data.firstName || data.lastName) {
+        user.fullName = data.fullName || `${data.firstName} ${data.lastName}` || user.fullName;
+        user.name = user.fullName;
+      }
+      await user.save();
+    } else {
+      // Handle non-authenticated flow (token-based)
+      // Check if user exists, but don't reject if it does - allow update
+      const existingUser = await User.findOne({ email: data.email.toLowerCase().trim() });
+      user = existingUser;
+      
       if (user) {
         // Update existing user from initial application
         user.userName = data.username || user.userName || data.email.split("@")[0];
-        user.password = passwordHash;
-        user.fullName = data.fullName || `${data.firstName} ${data.lastName}`;
-        user.name = data.fullName || `${data.firstName} ${data.lastName}`;
-        user.role = data.role || "DRIVER";
-        user.status = "PENDING_APPROVAL";
-        user.approvalStatus = "PENDING";
+        // Only update password if it's not already set or if explicitly provided
+        if (data.password || !user.password) {
+          user.password = passwordHash;
+        }
+        user.fullName = data.fullName || `${data.firstName} ${data.lastName}` || user.fullName;
+        user.name = user.fullName;
+        user.role = data.role || user.role || "DRIVER";
+        // Don't override status if user is already ACTIVE or APPROVED
+        if (user.status === "PENDING_APPROVAL" || user.status === "PENDING_INDUCTION") {
+          user.status = "PENDING_APPROVAL";
+          user.approvalStatus = "PENDING";
+        }
         user.passwordChangeRequired = true;
         await user.save();
       } else {
         // Create new user
         user = await User.create({
-          email: data.email,
+          email: data.email.toLowerCase().trim(),
           userName: data.username || data.email.split("@")[0],
           password: passwordHash,
           fullName: data.fullName || `${data.firstName} ${data.lastName}`,
@@ -5144,22 +5158,34 @@ class MasterDataService {
           isSuperAdmin: false,
         });
       }
-    } else {
-      throw new AppError("Email already registered", HttpStatusCodes.BAD_REQUEST);
     }
 
-    // Create party record
-    const party = await Party.create({
-      firstName: data.firstName,
-      lastName: data.lastName,
-      companyName: data.companyName,
-      email: data.email,
-      phone: data.phone,
-      phoneAlt: data.phoneAlt,
-      suburb: data.suburb,
-      state: stateAbbrev,
-      abn: data.abn,
-    });
+    // Find or create party record
+    let party = await Party.findOne({ email: data.email.toLowerCase().trim() });
+    if (!party) {
+      party = await Party.create({
+        firstName: data.firstName,
+        lastName: data.lastName,
+        companyName: data.companyName,
+        email: data.email.toLowerCase().trim(),
+        phone: data.phone,
+        phoneAlt: data.phoneAlt,
+        suburb: data.suburb,
+        state: stateAbbrev,
+        abn: data.abn,
+      });
+    } else {
+      // Update existing party information
+      party.firstName = data.firstName || party.firstName;
+      party.lastName = data.lastName || party.lastName;
+      party.companyName = data.companyName || party.companyName;
+      party.phone = data.phone || party.phone;
+      party.phoneAlt = data.phoneAlt || party.phoneAlt;
+      party.suburb = data.suburb || party.suburb;
+      party.state = stateAbbrev || party.state;
+      party.abn = data.abn || party.abn;
+      await party.save();
+    }
 
     // Generate driver code
     const count = await Driver.countDocuments();
@@ -5185,19 +5211,43 @@ class MasterDataService {
     // Parse boolean
     const gstRegistered = data.gstRegistered === "true" || data.gstRegistered === true;
 
-    // Create or update driver record
-    let driver = await Driver.findOne({ userId: user._id });
+    // ⚠️ CRITICAL: Find driver - support multiple lookup methods
+    // Option 1: If authenticated user exists, find by userId
+    let driver = await Driver.findOne({ userId: user._id }).populate("party");
     
-    // Verify driver is in NEW_RECRUIT status (must be approved first)
-    if (driver && driver.driverStatus !== "NEW_RECRUIT" && driver.driverStatus !== "PENDING_INDUCTION") {
+    // Option 2: If not found by userId, try finding by email via party
+    if (!driver && data.email) {
+      const party = await Party.findOne({ email: data.email.toLowerCase().trim() });
+      if (party) {
+        driver = await Driver.findOne({ partyId: party._id }).populate("party");
+        // If found by party, ensure userId is linked
+        if (driver && !driver.userId) {
+          driver.userId = user._id;
+          await driver.save();
+          console.log(`✅ Linked driver ${driver._id.toString()} to user ${user._id.toString()} during induction submission`);
+        }
+      }
+    }
+    
+    // ⚠️ CRITICAL: Verify driver exists
+    if (!driver) {
       throw new AppError(
-        `Driver must be approved first. Current status: ${driver.driverStatus}. Please wait for admin approval.`,
+        "Driver not found. Please ensure you have submitted an application first.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+    
+    // ⚠️ CRITICAL: Verify driver status allows induction submission
+    // Only allow NEW_RECRUIT or PENDING_INDUCTION drivers to submit/update
+    if (driver.driverStatus && !['NEW_RECRUIT', 'PENDING_INDUCTION'].includes(driver.driverStatus)) {
+      throw new AppError(
+        `Cannot submit induction. Current status: ${driver.driverStatus}. Expected: NEW_RECRUIT or PENDING_INDUCTION`,
         HttpStatusCodes.BAD_REQUEST
       );
     }
     
+    // Create new driver record only if it doesn't exist (should not happen if flow is correct, but handle gracefully)
     if (!driver) {
-      // Create new driver record (should not happen if flow is correct, but handle gracefully)
       driver = await Driver.create({
         partyId: party._id,
         userId: user._id,
@@ -5229,10 +5279,12 @@ class MasterDataService {
         workersCompExpiry: parseDate(data.workersCompExpiry),
       });
     } else {
-      // Update existing driver record
-      driver.driverStatus = "PENDING_INDUCTION";
-      driver.complianceStatus = "PENDING_REVIEW";
-      driver.isActive = false;
+      // ⚠️ CRITICAL: Update existing driver record with status changes
+      // This status update is MANDATORY - it triggers frontend to hide "Complete Induction Form" button
+      driver.driverStatus = data.driverStatus || "PENDING_INDUCTION"; // From form data or default
+      driver.complianceStatus = data.complianceStatus || "PENDING_REVIEW"; // From form data or default
+      driver.isActive = false; // MUST remain false until staff approval
+      driver.userId = user._id; // Ensure userId is always linked
       driver.contactType = data.contactType || driver.contactType;
       driver.abn = data.abn || driver.abn;
       driver.bankName = data.bankName || driver.bankName;
@@ -5253,6 +5305,23 @@ class MasterDataService {
       driver.publicLiabilityExpiry = parseDate(data.publicLiabilityExpiry) || driver.publicLiabilityExpiry;
       driver.workersCompExpiry = parseDate(data.workersCompExpiry) || driver.workersCompExpiry;
       await driver.save();
+      
+      // Verify the update was successful
+      const savedDriver = await Driver.findById(driver._id)
+        .select("driverStatus complianceStatus isActive userId")
+        .lean();
+      
+      console.log(`✅ Driver ${driver._id.toString()} status updated:`, {
+        driverStatus: savedDriver.driverStatus,
+        complianceStatus: savedDriver.complianceStatus,
+        isActive: savedDriver.isActive,
+        userId: savedDriver.userId?.toString() || 'NOT LINKED'
+      });
+      
+      // Update driver reference for response
+      driver.driverStatus = savedDriver.driverStatus;
+      driver.complianceStatus = savedDriver.complianceStatus;
+      driver.isActive = savedDriver.isActive;
     }
 
     // Upload and store documents
@@ -5371,13 +5440,20 @@ class MasterDataService {
       // Continue even if email fails
     }
 
+    // ⚠️ CRITICAL: Return updated status in response so frontend can refresh
+    // Reload driver to ensure we have the latest status
+    const updatedDriver = await Driver.findById(driver._id)
+      .select("driverStatus complianceStatus isActive")
+      .lean();
+    
     return {
       success: true,
       message: "Induction submitted successfully",
       driver: {
         id: driver._id.toString(),
-        driverStatus: driver.driverStatus,
-        complianceStatus: driver.complianceStatus,
+        driverStatus: updatedDriver.driverStatus || driver.driverStatus,
+        complianceStatus: updatedDriver.complianceStatus || driver.complianceStatus,
+        isActive: updatedDriver.isActive !== undefined ? updatedDriver.isActive : driver.isActive,
       },
     };
   }
@@ -5415,8 +5491,17 @@ class MasterDataService {
       );
     }
 
-    // CRITICAL: Create user account if it doesn't exist
+    // CRITICAL: Find or create user account
+    // First try to find by driver.userId
     let driverUser = driver.userId ? await User.findById(driver.userId) : null;
+    
+    // If not found by userId, try to find by email
+    if (!driverUser && driver.party?.email) {
+      driverUser = await User.findOne({ email: driver.party.email.toLowerCase().trim() });
+      if (driverUser) {
+        console.log(`✅ Found existing user by email: ${driverUser.email} (userId: ${driverUser._id.toString()})`);
+      }
+    }
 
     if (!driverUser) {
       // User account doesn't exist - create it now
@@ -5467,26 +5552,29 @@ class MasterDataService {
       driverUser.status = "ACTIVE";
       driverUser.passwordChangeRequired = true; // Ensure password change is required
       driverUser.permissions = ensureDriverPermissions(driverUser.permissions);
+      driverUser.role = "DRIVER"; // Ensure role is set
       await driverUser.save();
 
-      // Ensure userId is linked
-      if (!driver.userId) {
-        driver.userId = driverUser._id;
-      }
+      // CRITICAL: Always ensure userId is linked (even if it was already set)
+      driver.userId = driverUser._id;
 
       console.log(
-        `✅ Updated existing user account for driver ${driver._id.toString()}: ${driverUser.email}`
+        `✅ Updated existing user account for driver ${driver._id.toString()}: ${driverUser.email} (userId: ${driverUser._id.toString()})`
       );
     }
 
-    // Update driver status
+    // Update driver status - CRITICAL: Always use the driverUser._id we found/created
     driver.driverStatus = "COMPLIANT";
     driver.complianceStatus = "COMPLIANT";
     driver.isActive = true;
     driver.approvedAt = new Date();
     driver.approvedBy = user.id;
-    driver.userId = driverUser._id; // Ensure userId is always linked
+    driver.userId = driverUser._id; // CRITICAL: Always link to the user we found/created
     await driver.save();
+    
+    console.log(
+      `✅ Driver record updated - Linking driver ${driver._id.toString()} to user ${driverUser._id.toString()} (${driverUser.email})`
+    );
 
     // Verify driver status was saved correctly (will be reflected in login response)
     // Reload from database to confirm the save
@@ -5544,6 +5632,82 @@ class MasterDataService {
       },
       // Note: Password is NOT returned in response for security
       // Password (123456) is sent via email only
+    };
+  }
+
+  /**
+   * Sync/Fix driver-user link for existing drivers
+   * This method helps fix drivers that were approved but the userId link is missing or incorrect
+   * @param {string} userId - User ID to sync with driver
+   * @returns {Object} Updated driver and user information
+   */
+  static async syncDriverUserLink(userId) {
+    const User = require("../models/user.model");
+    const Party = require("../models/party.model");
+
+    // Find user
+    const user = await User.findById(userId);
+    if (!user) {
+      throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
+    }
+
+    if (user.role !== "DRIVER") {
+      throw new AppError("User is not a driver.", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find driver record - try by userId first, then by email via party
+    let driver = await Driver.findOne({ userId: user._id }).populate("party");
+    
+    // If not found by userId, try to find by email via party
+    if (!driver) {
+      const party = await Party.findOne({ email: user.email }).select("_id").lean();
+      if (party) {
+        driver = await Driver.findOne({ partyId: party._id }).populate("party");
+      }
+    }
+    
+    if (!driver) {
+      throw new AppError(
+        "Driver record not found. Cannot sync driver-user link.",
+        HttpStatusCodes.NOT_FOUND
+      );
+    }
+
+    // Ensure userId is linked
+    const wasLinked = driver.userId && driver.userId.toString() === user._id.toString();
+    driver.userId = user._id;
+    await driver.save();
+
+    // Reload to verify
+    const savedDriver = await Driver.findById(driver._id)
+      .select("driverStatus complianceStatus isActive userId")
+      .lean();
+
+    console.log(
+      `✅ Driver-user link synced: driver ${driver._id.toString()} <-> user ${user._id.toString()} (${user.email})`
+    );
+    if (!wasLinked) {
+      console.log(`   ⚠️ Link was missing and has been fixed!`);
+    }
+
+    return {
+      success: true,
+      message: wasLinked 
+        ? "Driver-user link already exists and is correct." 
+        : "Driver-user link has been fixed.",
+      driver: {
+        id: savedDriver._id.toString(),
+        driverStatus: savedDriver.driverStatus,
+        complianceStatus: savedDriver.complianceStatus,
+        isActive: savedDriver.isActive,
+        userId: savedDriver.userId?.toString() || null,
+      },
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        role: user.role,
+        status: user.status,
+      },
     };
   }
 

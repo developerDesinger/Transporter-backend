@@ -653,6 +653,16 @@ class MasterDataController {
     const formData = { ...req.body };
     const files = req.files || {};
 
+    // ⚠️ CRITICAL: Support authenticated users (if Authorization header is present)
+    // If user is authenticated, use their userId for driver lookup
+    if (req.user && req.user.id) {
+      formData.userId = req.user.id;
+      // If email not provided, use authenticated user's email
+      if (!formData.email && req.user.email) {
+        formData.email = req.user.email;
+      }
+    }
+
     // Get token from query params or form data
     if (req.query.token && !formData.token) {
       formData.token = req.query.token;
@@ -694,6 +704,12 @@ class MasterDataController {
   static approveDriverInduction = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
     const result = await MasterDataService.approveDriverInduction(id, req.user);
+    return res.status(200).json(result);
+  });
+
+  static syncDriverUserLink = catchAsyncHandler(async (req, res) => {
+    const { userId } = req.params;
+    const result = await MasterDataService.syncDriverUserLink(userId);
     return res.status(200).json(result);
   });
 

@@ -254,6 +254,13 @@ router.patch(
 );
 
 router.post(
+  "/drivers/sync-user-link/:userId",
+  isAuthenticated,
+  requirePermission("drivers.manage"),
+  MasterDataController.syncDriverUserLink
+);
+
+router.post(
   "/drivers",
   isAuthenticated,
   requirePermission("master_data.manage"),

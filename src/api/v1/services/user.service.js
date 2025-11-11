@@ -1083,8 +1083,17 @@ class UserService {
       throw new AppError("User not found.", HttpStatusCodes.NOT_FOUND);
     }
 
-    // Find driver record
-    const driver = await Driver.findOne({ userId: user._id }).populate("party");
+    // Find driver record - try by userId first, then by email via party
+    let driver = await Driver.findOne({ userId: user._id }).populate("party");
+    
+    // If not found by userId, try to find by email via party
+    if (!driver) {
+      const party = await Party.findOne({ email: user.email }).select("_id").lean();
+      if (party) {
+        driver = await Driver.findOne({ partyId: party._id }).populate("party");
+      }
+    }
+    
     if (!driver) {
       throw new AppError(
         "Driver record not found. Cannot approve driver application.",
@@ -1138,6 +1147,20 @@ class UserService {
     driver.isActive = false; // Still inactive until induction is approved
     driver.userId = user._id; // Ensure userId is linked
     await driver.save();
+    
+    // Verify driver status was saved correctly
+    const savedDriver = await Driver.findById(driver._id)
+      .select("driverStatus complianceStatus isActive userId")
+      .lean();
+    
+    console.log(
+      `✅ Driver application approved - Status updated: driverStatus=${savedDriver.driverStatus}, complianceStatus=${savedDriver.complianceStatus}, isActive=${savedDriver.isActive}, userId=${savedDriver.userId?.toString() || 'NOT LINKED'}`
+    );
+    
+    // Verify the status was actually saved
+    if (savedDriver.driverStatus !== "NEW_RECRUIT" || savedDriver.complianceStatus !== "PENDING_INDUCTION") {
+      console.error(`❌ ERROR: Driver status was not saved correctly! Expected NEW_RECRUIT/PENDING_INDUCTION, got ${savedDriver.driverStatus}/${savedDriver.complianceStatus}`);
+    }
 
     // Send approval email to driver with login credentials
     try {
