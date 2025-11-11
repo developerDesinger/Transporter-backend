@@ -833,6 +833,7 @@ router.delete(
 // ==================== VEHICLE TYPES ====================
 router.get(
   "/vehicle-types",
+  isAuthenticated,
   requirePermission("master_data.view"),
   MasterDataController.getAllVehicleTypes
 );
@@ -897,6 +898,128 @@ router.post(
   isAuthenticated,
   requireAnyPermission("drivers.manage", "master_data.manage"),
   MasterDataController.sendRCTIs
+);
+
+// Vehicle routes
+// Note: General routes must come before parameterized routes
+router.get(
+  "/vehicles",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getAllVehicles
+);
+
+router.post(
+  "/vehicles",
+  isAuthenticated,
+  requirePermission("vehicles.create"),
+  MasterDataController.createVehicle
+);
+
+// More specific routes must come before less specific routes
+router.get(
+  "/vehicles/:id/maintenance-logs",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getMaintenanceLogs
+);
+
+router.post(
+  "/vehicles/:id/maintenance-logs",
+  isAuthenticated,
+  requirePermission("vehicles.manage"),
+  MasterDataController.createMaintenanceLog
+);
+
+router.get(
+  "/vehicles/:id/history",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getVehicleHistory
+);
+
+router.get(
+  "/vehicles/:id",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getVehicleById
+);
+
+// Vehicle Profile Actions routes
+// GET routes (must come before POST routes to avoid conflicts)
+router.get(
+  "/inspections",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getInspections
+);
+
+router.get(
+  "/defects",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getDefects
+);
+
+router.get(
+  "/work-orders",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getWorkOrders
+);
+
+router.get(
+  "/schedules",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getSchedules
+);
+
+router.get(
+  "/documents",
+  isAuthenticated,
+  requirePermission("vehicles.view"),
+  MasterDataController.getVehicleDocuments
+);
+
+// POST routes
+router.post(
+  "/inspections",
+  isAuthenticated,
+  requirePermission("vehicles.manage"),
+  MasterDataController.createInspection
+);
+
+router.post(
+  "/defects",
+  isAuthenticated,
+  requirePermission("vehicles.manage"),
+  MasterDataController.createDefect
+);
+
+router.post(
+  "/work-orders",
+  isAuthenticated,
+  requirePermission("vehicles.manage"),
+  MasterDataController.createWorkOrder
+);
+
+router.post(
+  "/schedules",
+  isAuthenticated,
+  requirePermission("vehicles.manage"),
+  MasterDataController.createSchedule
+);
+
+router.post(
+  "/documents",
+  isAuthenticated,
+  requirePermission("vehicles.manage"),
+  multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  }).single("file"),
+  MasterDataController.uploadVehicleDocument
 );
 
 // All master data routes require authentication and permission

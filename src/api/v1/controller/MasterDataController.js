@@ -573,6 +573,138 @@ class MasterDataController {
     return res.status(200).json(result);
   });
 
+  // ==================== VEHICLES ====================
+  static getAllVehicles = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getAllVehicles(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static getVehicleById = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.getVehicleById(id, req.user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static createVehicle = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createVehicle(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      message: "Vehicle created successfully",
+      data: result,
+    });
+  });
+
+  static getVehicleHistory = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.getVehicleHistory(id, req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static getMaintenanceLogs = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.getMaintenanceLogs(id, req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createMaintenanceLog = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.createMaintenanceLog(id, req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      message: "Maintenance log created successfully",
+      data: result,
+    });
+  });
+
+  // ==================== VEHICLE PROFILE ACTIONS ====================
+  static getInspections = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getInspections(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createInspection = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createInspection(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      message: "Inspection created successfully",
+      data: result,
+    });
+  });
+
+  static getDefects = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getDefects(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createDefect = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createDefect(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      message: "Defect reported successfully",
+      data: result,
+    });
+  });
+
+  static getWorkOrders = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getWorkOrders(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createWorkOrder = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createWorkOrder(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      message: "Work order created successfully",
+      data: result,
+    });
+  });
+
+  static getSchedules = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getSchedules(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createSchedule = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createSchedule(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      message: "Schedule created successfully",
+      data: result,
+    });
+  });
+
+  static getVehicleDocuments = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getVehicleDocuments(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static uploadVehicleDocument = catchAsyncHandler(async (req, res) => {
+    const file = req.file;
+    const formData = { ...req.body };
+
+    try {
+      const result = await MasterDataService.uploadVehicleDocument(formData, file, req.user);
+      return res.status(201).json({
+        success: true,
+        message: "Document uploaded successfully",
+        data: result,
+      });
+    } catch (error) {
+      // Handle multer errors
+      if (error.message && error.message.includes("File too large")) {
+        return res.status(413).json({
+          success: false,
+          message: "File too large",
+          error: "File size exceeds 10MB limit",
+        });
+      }
+      throw error; // Re-throw to be handled by global error handler
+    }
+  });
+
   // ==================== DOCUMENT TEMPLATES ====================
   static getAllDocumentTemplates = catchAsyncHandler(async (req, res) => {
     const templates = await MasterDataService.getAllDocumentTemplates();
@@ -621,7 +753,7 @@ class MasterDataController {
 
   // ==================== VEHICLE TYPES ====================
   static getAllVehicleTypes = catchAsyncHandler(async (req, res) => {
-    const types = await MasterDataService.getAllVehicleTypes();
+    const types = await MasterDataService.getAllVehicleTypes(req.user);
     return res.status(200).json(types);
   });
 

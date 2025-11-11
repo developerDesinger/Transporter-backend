@@ -4573,15 +4573,1952 @@ class MasterDataService {
 
   // ==================== VEHICLE TYPES ====================
 
-  static async getAllVehicleTypes() {
-    const types = await VehicleType.find().sort({ sortOrder: 1, code: 1 }).lean();
+  /**
+   * Get all active vehicle types
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of vehicle type objects
+   */
+  static async getAllVehicleTypes(user) {
+    // Build query filter
+    // For backward compatibility: include records where isActive doesn't exist OR isActive is true
+    // Only exclude records where isActive is explicitly false
+    const filter = {
+      $or: [
+        { isActive: { $exists: false } }, // Include records without isActive field (backward compatibility)
+        { isActive: true }, // Include active records
+      ],
+    };
+
+    // Multi-tenant support - filter by organizationId if user has one
+    if (user && user.activeOrganizationId) {
+      // If user has organization, return vehicle types for that organization OR without organization (global)
+      // Combine with $and to ensure both conditions are met
+      filter.$and = [
+        {
+          $or: [
+            { organizationId: user.activeOrganizationId },
+            { organizationId: null },
+            { organizationId: { $exists: false } }, // Backward compatibility
+          ],
+        },
+      ];
+    } else if (user) {
+      // If user has no active organization, only return vehicle types without organization (global)
+      filter.$and = [
+        {
+          $or: [
+            { organizationId: null },
+            { organizationId: { $exists: false } }, // Backward compatibility
+          ],
+        },
+      ];
+    }
+
+    // Debug: Log the filter to help diagnose issues
+    console.log("🔍 Vehicle Types Query Filter:", JSON.stringify(filter, null, 2));
+
+    // Fetch vehicle types, sorted by sortOrder then by code
+    const types = await VehicleType.find(filter)
+      .sort({ sortOrder: 1, code: 1 })
+      .lean();
+
+    console.log(`✅ Found ${types.length} vehicle types`);
 
     return types.map((type) => ({
       id: type._id.toString(),
       code: type.code,
       fullName: type.fullName,
-      sortOrder: type.sortOrder,
+      sortOrder: type.sortOrder || 0,
     }));
+  }
+
+  // ==================== VEHICLES ====================
+
+  /**
+   * Get all vehicles with optional filtering
+   * @param {Object} query - Query parameters (status, search, page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Vehicles list with pagination
+   */
+  static async getAllVehicles(query, user) {
+    const Vehicle = require("../models/vehicle.model");
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null; // Only show vehicles without organization
+    }
+
+    // Status filter
+    if (query.status) {
+      filter.status = query.status;
+    }
+
+    // Search filter (fleetNo, registration, make, model)
+    if (query.search) {
+      filter.$or = [
+        { fleetNo: { $regex: query.search, $options: "i" } },
+        { registration: { $regex: query.search, $options: "i" } },
+        { make: { $regex: query.search, $options: "i" } },
+        { model: { $regex: query.search, $options: "i" } },
+        { vin: { $regex: query.search, $options: "i" } },
+      ];
+    }
+
+    // Ownership filter
+    if (query.ownership) {
+      filter.ownership = query.ownership;
+    }
+
+    const totalVehicles = await Vehicle.countDocuments(filter);
+    const totalPages = Math.ceil(totalVehicles / limit);
+
+    const vehicles = await Vehicle.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedVehicles = vehicles.map((vehicle) => ({
+      id: vehicle._id.toString(),
+      fleetNo: vehicle.fleetNo,
+      registration: vehicle.registration,
+      vin: vehicle.vin,
+      state: vehicle.state,
+      regoExpiry: vehicle.regoExpiry ? vehicle.regoExpiry.toISOString() : null,
+      make: vehicle.make,
+      model: vehicle.model,
+      year: vehicle.year,
+      gvm: vehicle.gvm,
+      gcm: vehicle.gcm,
+      axleConfig: vehicle.axleConfig,
+      ownership: vehicle.ownership,
+      status: vehicle.status,
+      insurancePolicyNo: vehicle.insurancePolicyNo,
+      insuranceExpiry: vehicle.insuranceExpiry ? vehicle.insuranceExpiry.toISOString() : null,
+      notes: vehicle.notes,
+      createdAt: vehicle.createdAt.toISOString(),
+      updatedAt: vehicle.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedVehicles,
+      pagination: {
+        page,
+        limit,
+        total: totalVehicles,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Get vehicle by ID
+   * @param {string} vehicleId - Vehicle ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Vehicle object
+   */
+  static async getVehicleById(vehicleId, user) {
+    const Vehicle = require("../models/vehicle.model");
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Build filter
+    const filter = {
+      _id: new mongoose.Types.ObjectId(vehicleId),
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    const vehicle = await Vehicle.findOne(filter).lean();
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    return {
+      id: vehicle._id.toString(),
+      fleetNo: vehicle.fleetNo,
+      registration: vehicle.registration,
+      vin: vehicle.vin,
+      state: vehicle.state,
+      regoExpiry: vehicle.regoExpiry ? vehicle.regoExpiry.toISOString() : null,
+      make: vehicle.make,
+      model: vehicle.model,
+      year: vehicle.year,
+      gvm: vehicle.gvm,
+      gcm: vehicle.gcm,
+      axleConfig: vehicle.axleConfig,
+      ownership: vehicle.ownership,
+      status: vehicle.status,
+      insurancePolicyNo: vehicle.insurancePolicyNo,
+      insuranceExpiry: vehicle.insuranceExpiry ? vehicle.insuranceExpiry.toISOString() : null,
+      notes: vehicle.notes,
+      createdAt: vehicle.createdAt.toISOString(),
+      updatedAt: vehicle.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Create a new vehicle
+   * @param {Object} data - Vehicle data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created vehicle
+   */
+  static async createVehicle(data, user) {
+    const Vehicle = require("../models/vehicle.model");
+
+    // Validation errors array
+    const errors = [];
+
+    // Required field validation
+    if (!data.fleetNo || !data.fleetNo.trim()) {
+      errors.push({
+        field: "fleetNo",
+        message: "Fleet number is required",
+      });
+    } else if (data.fleetNo.length > 50) {
+      errors.push({
+        field: "fleetNo",
+        message: "Fleet number must be 50 characters or less",
+      });
+    } else if (!/^[A-Za-z0-9_-]+$/.test(data.fleetNo)) {
+      errors.push({
+        field: "fleetNo",
+        message: "Fleet number can only contain letters, numbers, hyphens, and underscores",
+      });
+    }
+
+    if (!data.registration || !data.registration.trim()) {
+      errors.push({
+        field: "registration",
+        message: "Registration is required",
+      });
+    } else if (data.registration.length > 20) {
+      errors.push({
+        field: "registration",
+        message: "Registration must be 20 characters or less",
+      });
+    } else if (!/^[A-Za-z0-9]+$/.test(data.registration)) {
+      errors.push({
+        field: "registration",
+        message: "Registration can only contain letters and numbers",
+      });
+    }
+
+    if (!data.make || !data.make.trim()) {
+      errors.push({
+        field: "make",
+        message: "Make is required",
+      });
+    } else if (data.make.length > 50) {
+      errors.push({
+        field: "make",
+        message: "Make must be 50 characters or less",
+      });
+    }
+
+    if (!data.model || !data.model.trim()) {
+      errors.push({
+        field: "model",
+        message: "Model is required",
+      });
+    } else if (data.model.length > 50) {
+      errors.push({
+        field: "model",
+        message: "Model must be 50 characters or less",
+      });
+    }
+
+    // Optional field validation
+    if (data.vin && data.vin.length > 17) {
+      errors.push({
+        field: "vin",
+        message: "VIN must be 17 characters or less",
+      });
+    } else if (data.vin && !/^[A-Za-z0-9]+$/.test(data.vin)) {
+      errors.push({
+        field: "vin",
+        message: "VIN can only contain letters and numbers",
+      });
+    }
+
+    const validStates = [
+      "Australian Capital Territory",
+      "New South Wales",
+      "Northern Territory",
+      "Queensland",
+      "South Australia",
+      "Tasmania",
+      "Victoria",
+      "Western Australia",
+    ];
+
+    if (data.state && !validStates.includes(data.state)) {
+      errors.push({
+        field: "state",
+        message: `State must be one of: ${validStates.join(", ")}`,
+      });
+    }
+
+    if (data.year !== undefined && data.year !== null) {
+      const currentYear = new Date().getFullYear();
+      if (!Number.isInteger(data.year) || data.year < 1900 || data.year > currentYear + 1) {
+        errors.push({
+          field: "year",
+          message: `Year must be between 1900 and ${currentYear + 1}`,
+        });
+      }
+    }
+
+    if (data.gvm !== undefined && data.gvm !== null) {
+      const gvm = parseFloat(data.gvm);
+      if (isNaN(gvm) || gvm < 0) {
+        errors.push({
+          field: "gvm",
+          message: "GVM must be a positive number",
+        });
+      }
+    }
+
+    if (data.gcm !== undefined && data.gcm !== null) {
+      const gcm = parseFloat(data.gcm);
+      if (isNaN(gcm) || gcm < 0) {
+        errors.push({
+          field: "gcm",
+          message: "GCM must be a positive number",
+        });
+      }
+    }
+
+    if (data.axleConfig && data.axleConfig.length > 20) {
+      errors.push({
+        field: "axleConfig",
+        message: "Axle configuration must be 20 characters or less",
+      });
+    }
+
+    const validOwnership = ["Owned", "Leased", "Subbie"];
+    if (data.ownership && !validOwnership.includes(data.ownership)) {
+      errors.push({
+        field: "ownership",
+        message: `Ownership must be one of: ${validOwnership.join(", ")}`,
+      });
+    }
+
+    const validStatus = ["active", "inactive", "workshop", "hold"];
+    if (data.status && !validStatus.includes(data.status)) {
+      errors.push({
+        field: "status",
+        message: `Status must be one of: ${validStatus.join(", ")}`,
+      });
+    }
+
+    if (data.insurancePolicyNo && data.insurancePolicyNo.length > 100) {
+      errors.push({
+        field: "insurancePolicyNo",
+        message: "Insurance policy number must be 100 characters or less",
+      });
+    }
+
+    if (data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    // Date validation
+    let regoExpiryDate = null;
+    if (data.regoExpiry) {
+      regoExpiryDate = new Date(data.regoExpiry);
+      if (isNaN(regoExpiryDate.getTime())) {
+        errors.push({
+          field: "regoExpiry",
+          message: "Registration expiry must be a valid date (ISO 8601)",
+        });
+      }
+    }
+
+    let insuranceExpiryDate = null;
+    if (data.insuranceExpiry) {
+      insuranceExpiryDate = new Date(data.insuranceExpiry);
+      if (isNaN(insuranceExpiryDate.getTime())) {
+        errors.push({
+          field: "insuranceExpiry",
+          message: "Insurance expiry must be a valid date (ISO 8601)",
+        });
+      }
+    }
+
+    // If validation errors, throw error
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Check for duplicates
+    const existingFleetNo = await Vehicle.findOne({
+      fleetNo: data.fleetNo.toUpperCase().trim(),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (existingFleetNo) {
+      throw new AppError(
+        "A vehicle with this fleet number already exists.",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    const existingRegistration = await Vehicle.findOne({
+      registration: data.registration.toUpperCase().trim(),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (existingRegistration) {
+      throw new AppError(
+        "A vehicle with this registration already exists.",
+        HttpStatusCodes.CONFLICT
+      );
+    }
+
+    // Create vehicle
+    try {
+      const vehicle = await Vehicle.create({
+        fleetNo: data.fleetNo.toUpperCase().trim(),
+        registration: data.registration.toUpperCase().trim(),
+        vin: data.vin ? data.vin.toUpperCase().trim() : null,
+        state: data.state || null,
+        regoExpiry: regoExpiryDate,
+        make: data.make.trim(),
+        model: data.model.trim(),
+        year: data.year ? parseInt(data.year) : null,
+        gvm: data.gvm ? parseFloat(data.gvm) : null,
+        gcm: data.gcm ? parseFloat(data.gcm) : null,
+        axleConfig: data.axleConfig ? data.axleConfig.trim() : null,
+        ownership: data.ownership || "Owned",
+        status: data.status || "active",
+        insurancePolicyNo: data.insurancePolicyNo ? data.insurancePolicyNo.trim() : null,
+        insuranceExpiry: insuranceExpiryDate,
+        notes: data.notes ? data.notes.trim() : null,
+        organizationId: user.activeOrganizationId || null,
+      });
+
+      return {
+        id: vehicle._id.toString(),
+        fleetNo: vehicle.fleetNo,
+        registration: vehicle.registration,
+        vin: vehicle.vin,
+        state: vehicle.state,
+        regoExpiry: vehicle.regoExpiry ? vehicle.regoExpiry.toISOString() : null,
+        make: vehicle.make,
+        model: vehicle.model,
+        year: vehicle.year,
+        gvm: vehicle.gvm,
+        gcm: vehicle.gcm,
+        axleConfig: vehicle.axleConfig,
+        ownership: vehicle.ownership,
+        status: vehicle.status,
+        insurancePolicyNo: vehicle.insurancePolicyNo,
+        insuranceExpiry: vehicle.insuranceExpiry ? vehicle.insuranceExpiry.toISOString() : null,
+        notes: vehicle.notes,
+        createdAt: vehicle.createdAt.toISOString(),
+        updatedAt: vehicle.updatedAt.toISOString(),
+      };
+    } catch (error) {
+      // Handle MongoDB duplicate key errors (code 11000)
+      if (error.code === 11000) {
+        const field = Object.keys(error.keyPattern)[0];
+        let message = "A vehicle with this information already exists.";
+        if (field === "fleetNo") {
+          message = "A vehicle with this fleet number already exists.";
+        } else if (field === "registration") {
+          message = "A vehicle with this registration already exists.";
+        }
+        throw new AppError(message, HttpStatusCodes.CONFLICT);
+      }
+      // Re-throw other errors
+      throw error;
+    }
+  }
+
+  // ==================== VEHICLE PROFILE ACTIONS ====================
+
+  /**
+   * Get all inspections for a vehicle
+   * @param {Object} query - Query parameters (vehicleId, page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Inspections list with pagination
+   */
+  static async getInspections(query, user) {
+    const Inspection = require("../models/inspection.model");
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    // Vehicle ID filter (required)
+    if (!query.vehicleId) {
+      throw new AppError("vehicleId is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(query.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    filter.vehicleId = new mongoose.Types.ObjectId(query.vehicleId);
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Optional filters
+    if (query.type) {
+      filter.type = query.type;
+    }
+
+    if (query.result) {
+      filter.result = query.result;
+    }
+
+    const totalInspections = await Inspection.countDocuments(filter);
+    const totalPages = Math.ceil(totalInspections / limit);
+
+    const inspections = await Inspection.find(filter)
+      .populate("inspectedBy", "fullName name email")
+      .sort({ inspectedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedInspections = inspections.map((inspection) => ({
+      id: inspection._id.toString(),
+      vehicleId: inspection.vehicleId.toString(),
+      templateId: inspection.templateId ? inspection.templateId.toString() : null,
+      inspectedAt: inspection.inspectedAt.toISOString(),
+      inspectedBy: inspection.inspectedBy ? {
+        id: inspection.inspectedBy._id.toString(),
+        name: inspection.inspectedBy.fullName || inspection.inspectedBy.name,
+        email: inspection.inspectedBy.email,
+      } : {
+        id: inspection.inspectedBy.toString(),
+        name: inspection.inspectorName,
+      },
+      inspectorName: inspection.inspectorName,
+      result: inspection.result,
+      odometerKm: inspection.odometerKm,
+      engineHours: inspection.engineHours,
+      photos: inspection.photos,
+      notes: inspection.notes,
+      type: inspection.type,
+      createdAt: inspection.createdAt.toISOString(),
+      updatedAt: inspection.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedInspections,
+      pagination: {
+        page,
+        limit,
+        total: totalInspections,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Create a new inspection for a vehicle
+   * @param {Object} data - Inspection data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created inspection
+   */
+  static async createInspection(data, user) {
+    const Inspection = require("../models/inspection.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    const errors = [];
+
+    // Validation
+    if (!data.vehicleId) {
+      errors.push({ field: "vehicleId", message: "Vehicle ID is required" });
+    }
+
+    if (!data.type) {
+      errors.push({ field: "type", message: "Type is required" });
+    } else if (!["Prestart", "Quarterly", "Annual"].includes(data.type)) {
+      errors.push({
+        field: "type",
+        message: "Type must be one of: Prestart, Quarterly, Annual",
+      });
+    }
+
+    if (!data.result) {
+      errors.push({ field: "result", message: "Result is required" });
+    } else if (!["pass", "fail"].includes(data.result)) {
+      errors.push({
+        field: "result",
+        message: "Result must be one of: pass, fail",
+      });
+    }
+
+    if (!data.inspectedAt) {
+      errors.push({ field: "inspectedAt", message: "Inspected at date is required" });
+    } else {
+      const inspectedAt = new Date(data.inspectedAt);
+      if (isNaN(inspectedAt.getTime())) {
+        errors.push({
+          field: "inspectedAt",
+          message: "Inspected at must be a valid date (ISO 8601)",
+        });
+      }
+    }
+
+    if (data.odometerKm !== undefined && data.odometerKm !== null) {
+      const odometerKm = parseInt(data.odometerKm);
+      if (isNaN(odometerKm) || odometerKm < 0) {
+        errors.push({
+          field: "odometerKm",
+          message: "Odometer KM must be a positive integer",
+        });
+      }
+    }
+
+    if (data.engineHours !== undefined && data.engineHours !== null) {
+      const engineHours = parseFloat(data.engineHours);
+      if (isNaN(engineHours) || engineHours < 0) {
+        errors.push({
+          field: "engineHours",
+          message: "Engine hours must be a positive number",
+        });
+      }
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(data.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(data.vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Create inspection
+    const inspection = await Inspection.create({
+      vehicleId: data.vehicleId,
+      templateId: data.templateId || null,
+      inspectedAt: new Date(data.inspectedAt),
+      inspectedBy: user.id,
+      inspectorName: user.fullName || user.name || "Unknown",
+      result: data.result,
+      type: data.type,
+      odometerKm: data.odometerKm ? parseInt(data.odometerKm) : null,
+      engineHours: data.engineHours ? parseFloat(data.engineHours) : null,
+      photos: data.photos || [],
+      notes: data.notes || null,
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: inspection._id.toString(),
+      vehicleId: inspection.vehicleId.toString(),
+      templateId: inspection.templateId ? inspection.templateId.toString() : null,
+      inspectedAt: inspection.inspectedAt.toISOString(),
+      inspectedBy: inspection.inspectedBy.toString(),
+      inspectorName: inspection.inspectorName,
+      result: inspection.result,
+      odometerKm: inspection.odometerKm,
+      engineHours: inspection.engineHours,
+      photos: inspection.photos,
+      notes: inspection.notes,
+      type: inspection.type,
+      createdAt: inspection.createdAt.toISOString(),
+      updatedAt: inspection.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Get all defects for a vehicle
+   * @param {Object} query - Query parameters (vehicleId, page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Defects list with pagination
+   */
+  static async getDefects(query, user) {
+    const Defect = require("../models/defect.model");
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    // Vehicle ID filter (required)
+    if (!query.vehicleId) {
+      throw new AppError("vehicleId is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(query.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    filter.vehicleId = new mongoose.Types.ObjectId(query.vehicleId);
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Optional filters
+    if (query.severity) {
+      filter.severity = query.severity;
+    }
+
+    if (query.status) {
+      filter.status = query.status;
+    }
+
+    const totalDefects = await Defect.countDocuments(filter);
+    const totalPages = Math.ceil(totalDefects / limit);
+
+    const defects = await Defect.find(filter)
+      .populate("reportedBy", "fullName name email")
+      .sort({ reportedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedDefects = defects.map((defect) => ({
+      id: defect._id.toString(),
+      vehicleId: defect.vehicleId.toString(),
+      reportedBy: defect.reportedBy ? {
+        id: defect.reportedBy._id.toString(),
+        name: defect.reportedBy.fullName || defect.reportedBy.name,
+        email: defect.reportedBy.email,
+      } : {
+        id: defect.reportedBy.toString(),
+      },
+      reportedAt: defect.reportedAt.toISOString(),
+      severity: defect.severity,
+      description: defect.description,
+      photos: defect.photos,
+      status: defect.status,
+      workOrderId: defect.workOrderId ? defect.workOrderId.toString() : null,
+      notes: defect.notes,
+      createdAt: defect.createdAt.toISOString(),
+      updatedAt: defect.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedDefects,
+      pagination: {
+        page,
+        limit,
+        total: totalDefects,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Create a new defect for a vehicle
+   * @param {Object} data - Defect data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created defect
+   */
+  static async createDefect(data, user) {
+    const Defect = require("../models/defect.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    const errors = [];
+
+    // Validation
+    if (!data.vehicleId) {
+      errors.push({ field: "vehicleId", message: "Vehicle ID is required" });
+    }
+
+    if (!data.severity) {
+      errors.push({ field: "severity", message: "Severity is required" });
+    } else if (!["minor", "moderate", "critical"].includes(data.severity)) {
+      errors.push({
+        field: "severity",
+        message: "Severity must be one of: minor, moderate, critical",
+      });
+    }
+
+    if (!data.description || !data.description.trim()) {
+      errors.push({
+        field: "description",
+        message: "Description is required and cannot be empty",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(data.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(data.vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // If severity is critical, update vehicle status
+    if (data.severity === "critical") {
+      vehicle.status = "workshop";
+      await vehicle.save();
+    }
+
+    // Create defect
+    const defect = await Defect.create({
+      vehicleId: data.vehicleId,
+      reportedBy: user.id,
+      reportedAt: new Date(),
+      severity: data.severity,
+      description: data.description.trim(),
+      photos: data.photos || [],
+      status: "open",
+      workOrderId: null,
+      notes: data.notes || null,
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: defect._id.toString(),
+      vehicleId: defect.vehicleId.toString(),
+      reportedBy: defect.reportedBy.toString(),
+      reportedAt: defect.reportedAt.toISOString(),
+      severity: defect.severity,
+      description: defect.description,
+      photos: defect.photos,
+      status: defect.status,
+      workOrderId: defect.workOrderId ? defect.workOrderId.toString() : null,
+      notes: defect.notes,
+      createdAt: defect.createdAt.toISOString(),
+      updatedAt: defect.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Get all work orders for a vehicle
+   * @param {Object} query - Query parameters (vehicleId, page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Work orders list with pagination
+   */
+  static async getWorkOrders(query, user) {
+    const WorkOrder = require("../models/workOrder.model");
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    // Vehicle ID filter (required)
+    if (!query.vehicleId) {
+      throw new AppError("vehicleId is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(query.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    filter.vehicleId = new mongoose.Types.ObjectId(query.vehicleId);
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Optional filters
+    if (query.type) {
+      filter.type = query.type;
+    }
+
+    if (query.status) {
+      filter.status = query.status;
+    }
+
+    const totalWorkOrders = await WorkOrder.countDocuments(filter);
+    const totalPages = Math.ceil(totalWorkOrders / limit);
+
+    const workOrders = await WorkOrder.find(filter)
+      .populate("vendorId", "companyName firstName lastName")
+      .populate("approvedBy", "fullName name email")
+      .sort({ openedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedWorkOrders = workOrders.map((workOrder) => ({
+      id: workOrder._id.toString(),
+      vehicleId: workOrder.vehicleId.toString(),
+      openedAt: workOrder.openedAt.toISOString(),
+      closedAt: workOrder.closedAt ? workOrder.closedAt.toISOString() : null,
+      type: workOrder.type,
+      status: workOrder.status,
+      tasks: workOrder.tasks,
+      parts: workOrder.parts,
+      labourHours: workOrder.labourHours,
+      totalCost: workOrder.totalCost,
+      vendorId: workOrder.vendorId ? workOrder.vendorId.toString() : null,
+      documents: workOrder.documents,
+      approvedBy: workOrder.approvedBy ? {
+        id: workOrder.approvedBy._id.toString(),
+        name: workOrder.approvedBy.fullName || workOrder.approvedBy.name,
+        email: workOrder.approvedBy.email,
+      } : null,
+      description: workOrder.description,
+      createdAt: workOrder.createdAt.toISOString(),
+      updatedAt: workOrder.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedWorkOrders,
+      pagination: {
+        page,
+        limit,
+        total: totalWorkOrders,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Create a new work order for a vehicle
+   * @param {Object} data - Work order data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created work order
+   */
+  static async createWorkOrder(data, user) {
+    const WorkOrder = require("../models/workOrder.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    const errors = [];
+
+    // Validation
+    if (!data.vehicleId) {
+      errors.push({ field: "vehicleId", message: "Vehicle ID is required" });
+    }
+
+    if (!data.type) {
+      errors.push({ field: "type", message: "Type is required" });
+    } else if (!["Service", "Repair"].includes(data.type)) {
+      errors.push({
+        field: "type",
+        message: "Type must be one of: Service, Repair",
+      });
+    }
+
+    if (!data.tasks || !Array.isArray(data.tasks) || data.tasks.length === 0) {
+      errors.push({
+        field: "tasks",
+        message: "Tasks array is required and must contain at least one task",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(data.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(data.vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Create work order
+    const workOrder = await WorkOrder.create({
+      vehicleId: data.vehicleId,
+      openedAt: new Date(),
+      closedAt: null,
+      type: data.type,
+      status: "open",
+      tasks: data.tasks,
+      parts: [],
+      labourHours: null,
+      totalCost: 0,
+      vendorId: null,
+      documents: [],
+      approvedBy: null,
+      description: data.description || null,
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: workOrder._id.toString(),
+      vehicleId: workOrder.vehicleId.toString(),
+      openedAt: workOrder.openedAt.toISOString(),
+      closedAt: workOrder.closedAt ? workOrder.closedAt.toISOString() : null,
+      type: workOrder.type,
+      status: workOrder.status,
+      tasks: workOrder.tasks,
+      parts: workOrder.parts,
+      labourHours: workOrder.labourHours,
+      totalCost: workOrder.totalCost,
+      vendorId: workOrder.vendorId ? workOrder.vendorId.toString() : null,
+      documents: workOrder.documents,
+      approvedBy: workOrder.approvedBy ? workOrder.approvedBy.toString() : null,
+      createdAt: workOrder.createdAt.toISOString(),
+      updatedAt: workOrder.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Get all schedules for a vehicle
+   * @param {Object} query - Query parameters (vehicleId, page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Schedules list with pagination
+   */
+  static async getSchedules(query, user) {
+    const Schedule = require("../models/schedule.model");
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    // Vehicle ID filter (required)
+    if (!query.vehicleId) {
+      throw new AppError("vehicleId is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(query.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    filter.vehicleId = new mongoose.Types.ObjectId(query.vehicleId);
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Optional filters
+    if (query.status) {
+      filter.status = query.status;
+    }
+
+    if (query.basis) {
+      filter.basis = query.basis;
+    }
+
+    const totalSchedules = await Schedule.countDocuments(filter);
+    const totalPages = Math.ceil(totalSchedules / limit);
+
+    const schedules = await Schedule.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedSchedules = schedules.map((schedule) => ({
+      id: schedule._id.toString(),
+      vehicleId: schedule.vehicleId.toString(),
+      type: schedule.type,
+      basis: schedule.basis,
+      intervalValue: schedule.intervalValue,
+      nextDueAt: schedule.nextDueAt ? schedule.nextDueAt.toISOString() : null,
+      nextDueKm: schedule.nextDueKm,
+      nextDueHours: schedule.nextDueHours,
+      status: schedule.status,
+      createdAt: schedule.createdAt.toISOString(),
+      updatedAt: schedule.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedSchedules,
+      pagination: {
+        page,
+        limit,
+        total: totalSchedules,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Create a new schedule for a vehicle
+   * @param {Object} data - Schedule data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created schedule
+   */
+  static async createSchedule(data, user) {
+    const Schedule = require("../models/schedule.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    const errors = [];
+
+    // Validation
+    if (!data.vehicleId) {
+      errors.push({ field: "vehicleId", message: "Vehicle ID is required" });
+    }
+
+    if (!data.type || !data.type.trim()) {
+      errors.push({ field: "type", message: "Type is required" });
+    }
+
+    if (!data.basis) {
+      errors.push({ field: "basis", message: "Basis is required" });
+    } else if (!["KM", "HOURS", "TIME"].includes(data.basis)) {
+      errors.push({
+        field: "basis",
+        message: "Basis must be one of: KM, HOURS, TIME",
+      });
+    }
+
+    if (data.intervalValue === undefined || data.intervalValue === null) {
+      errors.push({ field: "intervalValue", message: "Interval value is required" });
+    } else {
+      const intervalValue = parseFloat(data.intervalValue);
+      if (isNaN(intervalValue) || intervalValue <= 0) {
+        errors.push({
+          field: "intervalValue",
+          message: "Interval value must be a positive number",
+        });
+      }
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(data.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(data.vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Calculate next due values based on basis
+    let nextDueAt = null;
+    let nextDueKm = null;
+    let nextDueHours = null;
+    const intervalValue = parseFloat(data.intervalValue);
+
+    if (data.basis === "KM") {
+      // For KM basis, we'd need current odometer reading from vehicle
+      // For now, set nextDueKm based on interval
+      nextDueKm = intervalValue; // This should be calculated from current odometer + interval
+    } else if (data.basis === "HOURS") {
+      // For HOURS basis, we'd need current engine hours
+      // For now, set nextDueHours based on interval
+      nextDueHours = intervalValue; // This should be calculated from current hours + interval
+    } else if (data.basis === "TIME") {
+      // For TIME basis, calculate next due date
+      const now = new Date();
+      now.setDate(now.getDate() + intervalValue); // Add intervalValue days
+      nextDueAt = now;
+    }
+
+    // Create schedule
+    const schedule = await Schedule.create({
+      vehicleId: data.vehicleId,
+      type: data.type.trim(),
+      basis: data.basis,
+      intervalValue: intervalValue,
+      nextDueAt: nextDueAt,
+      nextDueKm: nextDueKm,
+      nextDueHours: nextDueHours,
+      status: "Active",
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: schedule._id.toString(),
+      vehicleId: schedule.vehicleId.toString(),
+      type: schedule.type,
+      basis: schedule.basis,
+      intervalValue: schedule.intervalValue,
+      nextDueAt: schedule.nextDueAt ? schedule.nextDueAt.toISOString() : null,
+      nextDueKm: schedule.nextDueKm,
+      nextDueHours: schedule.nextDueHours,
+      status: schedule.status,
+      createdAt: schedule.createdAt.toISOString(),
+      updatedAt: schedule.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Get all documents for a vehicle
+   * @param {Object} query - Query parameters (vehicleId, page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Documents list with pagination
+   */
+  static async getVehicleDocuments(query, user) {
+    const VehicleDocument = require("../models/vehicleDocument.model");
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {};
+
+    // Vehicle ID filter (required)
+    if (!query.vehicleId) {
+      throw new AppError("vehicleId is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(query.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    filter.vehicleId = new mongoose.Types.ObjectId(query.vehicleId);
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Optional filters
+    if (query.type) {
+      filter.type = query.type;
+    }
+
+    const totalDocuments = await VehicleDocument.countDocuments(filter);
+    const totalPages = Math.ceil(totalDocuments / limit);
+
+    const documents = await VehicleDocument.find(filter)
+      .populate("uploadedBy", "fullName name email")
+      .sort({ uploadedAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedDocuments = documents.map((document) => ({
+      id: document._id.toString(),
+      vehicleId: document.vehicleId.toString(),
+      name: document.name,
+      fileName: document.fileName,
+      type: document.type,
+      fileType: document.fileType,
+      fileUrl: document.fileUrl,
+      size: document.size,
+      uploadedAt: document.uploadedAt.toISOString(),
+      uploadedBy: document.uploadedBy ? {
+        id: document.uploadedBy._id.toString(),
+        name: document.uploadedBy.fullName || document.uploadedBy.name,
+        email: document.uploadedBy.email,
+      } : {
+        id: document.uploadedBy.toString(),
+      },
+      createdAt: document.createdAt.toISOString(),
+      updatedAt: document.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedDocuments,
+      pagination: {
+        page,
+        limit,
+        total: totalDocuments,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Get vehicle history (combined inspections, defects, work orders, schedules, documents)
+   * @param {string} vehicleId - Vehicle ID
+   * @param {Object} query - Query parameters (page, limit, type)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Combined history with pagination
+   */
+  static async getVehicleHistory(vehicleId, query, user) {
+    const Inspection = require("../models/inspection.model");
+    const Defect = require("../models/defect.model");
+    const WorkOrder = require("../models/workOrder.model");
+    const Schedule = require("../models/schedule.model");
+    const VehicleDocument = require("../models/vehicleDocument.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build base filter
+    const baseFilter = {
+      vehicleId: new mongoose.Types.ObjectId(vehicleId),
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      baseFilter.organizationId = user.activeOrganizationId;
+    } else {
+      baseFilter.organizationId = null;
+    }
+
+    // Optional type filter (inspection, defect, workOrder, schedule, document)
+    const typeFilter = query.type;
+
+    // Fetch all history items in parallel
+    const [inspections, defects, workOrders, schedules, documents] = await Promise.all([
+      !typeFilter || typeFilter === "inspection"
+        ? Inspection.find(baseFilter)
+            .populate("inspectedBy", "fullName name email")
+            .sort({ inspectedAt: -1 })
+            .lean()
+        : [],
+      !typeFilter || typeFilter === "defect"
+        ? Defect.find(baseFilter)
+            .populate("reportedBy", "fullName name email")
+            .sort({ reportedAt: -1 })
+            .lean()
+        : [],
+      !typeFilter || typeFilter === "workOrder"
+        ? WorkOrder.find(baseFilter)
+            .populate("approvedBy", "fullName name email")
+            .sort({ openedAt: -1 })
+            .lean()
+        : [],
+      !typeFilter || typeFilter === "schedule"
+        ? Schedule.find(baseFilter)
+            .sort({ createdAt: -1 })
+            .lean()
+        : [],
+      !typeFilter || typeFilter === "document"
+        ? VehicleDocument.find(baseFilter)
+            .populate("uploadedBy", "fullName name email")
+            .sort({ uploadedAt: -1 })
+            .lean()
+        : [],
+    ]);
+
+    // Combine and format all history items
+    const historyItems = [];
+
+    // Add inspections
+    inspections.forEach((inspection) => {
+      historyItems.push({
+        id: inspection._id.toString(),
+        type: "inspection",
+        date: inspection.inspectedAt,
+        title: `${inspection.type} Inspection - ${inspection.result.toUpperCase()}`,
+        description: inspection.notes || `${inspection.type} inspection with result: ${inspection.result}`,
+        data: {
+          id: inspection._id.toString(),
+          vehicleId: inspection.vehicleId.toString(),
+          type: inspection.type,
+          result: inspection.result,
+          inspectedAt: inspection.inspectedAt.toISOString(),
+          inspectedBy: inspection.inspectedBy
+            ? {
+                id: inspection.inspectedBy._id.toString(),
+                name: inspection.inspectedBy.fullName || inspection.inspectedBy.name,
+                email: inspection.inspectedBy.email,
+              }
+            : {
+                id: inspection.inspectedBy.toString(),
+                name: inspection.inspectorName,
+              },
+          inspectorName: inspection.inspectorName,
+          odometerKm: inspection.odometerKm,
+          engineHours: inspection.engineHours,
+          photos: inspection.photos,
+          notes: inspection.notes,
+        },
+        createdAt: inspection.createdAt.toISOString(),
+      });
+    });
+
+    // Add defects
+    defects.forEach((defect) => {
+      historyItems.push({
+        id: defect._id.toString(),
+        type: "defect",
+        date: defect.reportedAt,
+        title: `Defect Reported - ${defect.severity.toUpperCase()}`,
+        description: defect.description,
+        data: {
+          id: defect._id.toString(),
+          vehicleId: defect.vehicleId.toString(),
+          severity: defect.severity,
+          description: defect.description,
+          reportedAt: defect.reportedAt.toISOString(),
+          reportedBy: defect.reportedBy
+            ? {
+                id: defect.reportedBy._id.toString(),
+                name: defect.reportedBy.fullName || defect.reportedBy.name,
+                email: defect.reportedBy.email,
+              }
+            : {
+                id: defect.reportedBy.toString(),
+              },
+          photos: defect.photos,
+          status: defect.status,
+          workOrderId: defect.workOrderId ? defect.workOrderId.toString() : null,
+          notes: defect.notes,
+        },
+        createdAt: defect.createdAt.toISOString(),
+      });
+    });
+
+    // Add work orders
+    workOrders.forEach((workOrder) => {
+      historyItems.push({
+        id: workOrder._id.toString(),
+        type: "workOrder",
+        date: workOrder.openedAt,
+        title: `${workOrder.type} Work Order - ${workOrder.status.toUpperCase()}`,
+        description: workOrder.description || workOrder.tasks.join(", "),
+        data: {
+          id: workOrder._id.toString(),
+          vehicleId: workOrder.vehicleId.toString(),
+          type: workOrder.type,
+          status: workOrder.status,
+          openedAt: workOrder.openedAt.toISOString(),
+          closedAt: workOrder.closedAt ? workOrder.closedAt.toISOString() : null,
+          tasks: workOrder.tasks,
+          parts: workOrder.parts,
+          labourHours: workOrder.labourHours,
+          totalCost: workOrder.totalCost,
+          approvedBy: workOrder.approvedBy
+            ? {
+                id: workOrder.approvedBy._id.toString(),
+                name: workOrder.approvedBy.fullName || workOrder.approvedBy.name,
+                email: workOrder.approvedBy.email,
+              }
+            : null,
+          description: workOrder.description,
+        },
+        createdAt: workOrder.createdAt.toISOString(),
+      });
+    });
+
+    // Add schedules
+    schedules.forEach((schedule) => {
+      historyItems.push({
+        id: schedule._id.toString(),
+        type: "schedule",
+        date: schedule.createdAt,
+        title: `${schedule.type} Schedule - ${schedule.status}`,
+        description: `Basis: ${schedule.basis}, Interval: ${schedule.intervalValue}`,
+        data: {
+          id: schedule._id.toString(),
+          vehicleId: schedule.vehicleId.toString(),
+          type: schedule.type,
+          basis: schedule.basis,
+          intervalValue: schedule.intervalValue,
+          nextDueAt: schedule.nextDueAt ? schedule.nextDueAt.toISOString() : null,
+          nextDueKm: schedule.nextDueKm,
+          nextDueHours: schedule.nextDueHours,
+          status: schedule.status,
+        },
+        createdAt: schedule.createdAt.toISOString(),
+      });
+    });
+
+    // Add documents
+    documents.forEach((document) => {
+      historyItems.push({
+        id: document._id.toString(),
+        type: "document",
+        date: document.uploadedAt,
+        title: `Document Uploaded - ${document.name}`,
+        description: document.type || "Document",
+        data: {
+          id: document._id.toString(),
+          vehicleId: document.vehicleId.toString(),
+          name: document.name,
+          fileName: document.fileName,
+          type: document.type,
+          fileType: document.fileType,
+          fileUrl: document.fileUrl,
+          size: document.size,
+          uploadedAt: document.uploadedAt.toISOString(),
+          uploadedBy: document.uploadedBy
+            ? {
+                id: document.uploadedBy._id.toString(),
+                name: document.uploadedBy.fullName || document.uploadedBy.name,
+                email: document.uploadedBy.email,
+              }
+            : {
+                id: document.uploadedBy.toString(),
+              },
+        },
+        createdAt: document.createdAt.toISOString(),
+      });
+    });
+
+    // Sort by date (most recent first)
+    historyItems.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Apply pagination
+    const total = historyItems.length;
+    const totalPages = Math.ceil(total / limit);
+    const paginatedItems = historyItems.slice(skip, skip + limit);
+
+    return {
+      data: paginatedItems,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Get maintenance logs for a vehicle
+   * @param {string} vehicleId - Vehicle ID
+   * @param {Object} query - Query parameters (page, limit)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Maintenance logs list with pagination
+   */
+  static async getMaintenanceLogs(vehicleId, query, user) {
+    const MaintenanceLog = require("../models/maintenanceLog.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    const page = parseInt(query.page) || 1;
+    const limit = parseInt(query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Build filter
+    const filter = {
+      vehicleId: new mongoose.Types.ObjectId(vehicleId),
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    const totalLogs = await MaintenanceLog.countDocuments(filter);
+    const totalPages = Math.ceil(totalLogs / limit);
+
+    const logs = await MaintenanceLog.find(filter)
+      .populate("createdBy", "fullName name email")
+      .sort({ maintenanceDate: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const formattedLogs = logs.map((log) => ({
+      id: log._id.toString(),
+      vehicleId: log.vehicleId.toString(),
+      schedule: log.schedule,
+      maintenanceDate: log.maintenanceDate.toISOString(),
+      conductorName: log.conductorName,
+      conductorQualifications: log.conductorQualifications,
+      workDescription: log.workDescription,
+      nextMaintenanceDue: log.nextMaintenanceDue ? log.nextMaintenanceDue.toISOString() : null,
+      approverName: log.approverName,
+      createdBy: log.createdBy
+        ? {
+            id: log.createdBy._id.toString(),
+            name: log.createdBy.fullName || log.createdBy.name,
+            email: log.createdBy.email,
+          }
+        : {
+            id: log.createdBy.toString(),
+          },
+      createdAt: log.createdAt.toISOString(),
+      updatedAt: log.updatedAt.toISOString(),
+    }));
+
+    return {
+      data: formattedLogs,
+      pagination: {
+        page,
+        limit,
+        total: totalLogs,
+        totalPages,
+      },
+      success: true,
+    };
+  }
+
+  /**
+   * Create a maintenance log for a vehicle
+   * @param {string} vehicleId - Vehicle ID
+   * @param {Object} data - Maintenance log data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created maintenance log
+   */
+  static async createMaintenanceLog(vehicleId, data, user) {
+    const MaintenanceLog = require("../models/maintenanceLog.model");
+    const Vehicle = require("../models/vehicle.model");
+
+    const errors = [];
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Validation
+    if (!data.schedule || !data.schedule.trim()) {
+      errors.push({ field: "schedule", message: "Schedule is required" });
+    } else if (data.schedule.length > 100) {
+      errors.push({
+        field: "schedule",
+        message: "Schedule must be 100 characters or less",
+      });
+    }
+
+    if (!data.maintenanceDate) {
+      errors.push({ field: "maintenanceDate", message: "Maintenance date is required" });
+    } else {
+      const maintenanceDate = new Date(data.maintenanceDate);
+      if (isNaN(maintenanceDate.getTime())) {
+        errors.push({
+          field: "maintenanceDate",
+          message: "Maintenance date must be a valid date (ISO 8601)",
+        });
+      }
+    }
+
+    if (!data.conductorName || !data.conductorName.trim()) {
+      errors.push({ field: "conductorName", message: "Conductor name is required" });
+    } else if (data.conductorName.length > 200) {
+      errors.push({
+        field: "conductorName",
+        message: "Conductor name must be 200 characters or less",
+      });
+    }
+
+    if (data.conductorQualifications && data.conductorQualifications.length > 200) {
+      errors.push({
+        field: "conductorQualifications",
+        message: "Conductor qualifications must be 200 characters or less",
+      });
+    }
+
+    if (!data.workDescription || !data.workDescription.trim()) {
+      errors.push({ field: "workDescription", message: "Work description is required" });
+    } else if (data.workDescription.length > 2000) {
+      errors.push({
+        field: "workDescription",
+        message: "Work description must be 2000 characters or less",
+      });
+    }
+
+    if (data.nextMaintenanceDue) {
+      const nextMaintenanceDue = new Date(data.nextMaintenanceDue);
+      if (isNaN(nextMaintenanceDue.getTime())) {
+        errors.push({
+          field: "nextMaintenanceDue",
+          message: "Next maintenance due must be a valid date (ISO 8601)",
+        });
+      }
+    }
+
+    if (data.approverName && data.approverName.length > 200) {
+      errors.push({
+        field: "approverName",
+        message: "Approver name must be 200 characters or less",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Extract organizationId from vehicle (preferred) or use from user context
+    // If organizationId is provided in request body, validate it matches vehicle's organization
+    let finalOrganizationId = vehicle.organizationId || user.activeOrganizationId || null;
+
+    if (data.organizationId) {
+      // Validate that provided organizationId matches vehicle's organizationId
+      const providedOrgId = data.organizationId.toString();
+      const vehicleOrgId = vehicle.organizationId ? vehicle.organizationId.toString() : null;
+
+      if (vehicleOrgId && providedOrgId !== vehicleOrgId) {
+        errors.push({
+          field: "organizationId",
+          message: "Organization ID does not match vehicle organization",
+        });
+      } else {
+        // If vehicle doesn't have organizationId but one is provided, use it
+        if (!vehicleOrgId) {
+          finalOrganizationId = new mongoose.Types.ObjectId(providedOrgId);
+        }
+      }
+    }
+
+    // Re-check errors after organizationId validation
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Create maintenance log
+    const maintenanceLog = await MaintenanceLog.create({
+      vehicleId: new mongoose.Types.ObjectId(vehicleId),
+      schedule: data.schedule.trim(),
+      maintenanceDate: new Date(data.maintenanceDate),
+      conductorName: data.conductorName.trim(),
+      conductorQualifications: data.conductorQualifications ? data.conductorQualifications.trim() : null,
+      workDescription: data.workDescription.trim(),
+      nextMaintenanceDue: data.nextMaintenanceDue ? new Date(data.nextMaintenanceDue) : null,
+      approverName: data.approverName ? data.approverName.trim() : null,
+      createdBy: user.id,
+      organizationId: finalOrganizationId,
+    });
+
+    return {
+      id: maintenanceLog._id.toString(),
+      vehicleId: maintenanceLog.vehicleId.toString(),
+      schedule: maintenanceLog.schedule,
+      maintenanceDate: maintenanceLog.maintenanceDate.toISOString(),
+      conductorName: maintenanceLog.conductorName,
+      conductorQualifications: maintenanceLog.conductorQualifications,
+      workDescription: maintenanceLog.workDescription,
+      nextMaintenanceDue: maintenanceLog.nextMaintenanceDue ? maintenanceLog.nextMaintenanceDue.toISOString() : null,
+      approverName: maintenanceLog.approverName,
+      createdBy: user.id,
+      createdAt: maintenanceLog.createdAt.toISOString(),
+      updatedAt: maintenanceLog.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Upload a document for a vehicle
+   * @param {Object} data - Document data
+   * @param {Object} file - Uploaded file
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created document
+   */
+  static async uploadVehicleDocument(data, file, user) {
+    const VehicleDocument = require("../models/vehicleDocument.model");
+    const Vehicle = require("../models/vehicle.model");
+    const { uploadFileToS3 } = require("./aws.service");
+    const path = require("path");
+
+    const errors = [];
+
+    // Validation
+    if (!file) {
+      errors.push({ field: "file", message: "File is required" });
+    }
+
+    if (!data.vehicleId) {
+      errors.push({ field: "vehicleId", message: "Vehicle ID is required" });
+    }
+
+    // File type validation
+    if (file) {
+      const allowedTypes = /jpeg|jpg|png|pdf|doc|docx/;
+      const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+      const mimetype = allowedTypes.test(file.mimetype);
+
+      if (!mimetype || !extname) {
+        errors.push({
+          field: "file",
+          message: "Invalid file type. Only images, PDFs, and documents are allowed.",
+        });
+      }
+
+      // File size validation (10MB max)
+      const maxSize = 10 * 1024 * 1024; // 10MB
+      if (file.size > maxSize) {
+        errors.push({
+          field: "file",
+          message: "File size exceeds 10MB limit",
+        });
+      }
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(data.vehicleId)) {
+      throw new AppError("Invalid vehicle ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Verify vehicle exists
+    const vehicle = await Vehicle.findOne({
+      _id: new mongoose.Types.ObjectId(data.vehicleId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!vehicle) {
+      throw new AppError("Vehicle not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Generate unique file name
+    const timestamp = Date.now();
+    const fileName = `${timestamp}-${file.originalname}`;
+    const key = `vehicles/${data.vehicleId}/${fileName}`;
+
+    // Upload to S3
+    let fileUrl;
+    try {
+      fileUrl = await uploadFileToS3(file.buffer, key, file.mimetype);
+    } catch (uploadError) {
+      console.error("Error uploading file to S3:", uploadError);
+      throw new AppError(
+        "Failed to upload file. Please try again.",
+        HttpStatusCodes.INTERNAL_SERVER_ERROR
+      );
+    }
+
+    // Get file extension
+    const fileType = path.extname(file.originalname).slice(1).toLowerCase();
+
+    // Create document record
+    const document = await VehicleDocument.create({
+      vehicleId: data.vehicleId,
+      name: data.name || file.originalname,
+      fileName: file.originalname,
+      type: data.type || "Document",
+      fileType: fileType,
+      fileUrl: fileUrl,
+      size: file.size,
+      uploadedAt: new Date(),
+      uploadedBy: user.id,
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: document._id.toString(),
+      vehicleId: document.vehicleId.toString(),
+      name: document.name,
+      fileName: document.fileName,
+      type: document.type,
+      fileType: document.fileType,
+      fileUrl: document.fileUrl,
+      size: document.size,
+      uploadedAt: document.uploadedAt.toISOString(),
+      uploadedBy: document.uploadedBy.toString(),
+      createdAt: document.createdAt.toISOString(),
+      updatedAt: document.updatedAt.toISOString(),
+    };
   }
 
   // ==================== INDUCTIONS ====================
