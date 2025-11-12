@@ -171,10 +171,16 @@ class UserController {
     return res.status(200).json(result);
   });
 
+  /**
+   * GET /api/v1/users/permissions
+   * Get current user's effective permissions
+   */
   static getUserPermissions = catchAsyncHandler(async (req, res) => {
     const { id: userId } = req.user;
     const result = await UserService.getUserPermissions(userId);
-    return res.status(200).json(result);
+    return res.status(200).json({
+      permissions: result.permissions,
+    });
   });
 
   // Get user permissions by user ID (for admin access control page)

@@ -859,6 +859,7 @@ class UserService {
    * @returns {Object} Permissions object
    */
   static async getUserPermissions(userId, customOnly = false) {
+    const { ROLE_PERMISSIONS, getAllPermissions } = require("../utils/permissions");
     const user = await User.findById(userId).select(
       "_id role isSuperAdmin permissions activeOrganizationId"
     );
@@ -888,16 +889,43 @@ class UserService {
 
     const isSuperAdmin = user.isSuperAdmin === true || user.role === "SUPER_ADMIN";
     
-    // Get permissions based on role
-    const permissions = getPermissionsForRole(
-      user.role,
-      isSuperAdmin,
-      isTenantAdmin,
-      user.permissions || []
-    );
+    // Calculate effective permissions
+    const permissions = new Set();
+
+    if (isSuperAdmin) {
+      // Super admin has all permissions from all roles
+      Object.values(ROLE_PERMISSIONS).forEach((rolePerms) => {
+        rolePerms.forEach((perm) => permissions.add(perm));
+      });
+      // Add super admin specific permissions
+      permissions.add("system.super_admin");
+      permissions.add("platform.organizations.manage");
+    } else {
+      // Get role-based permissions
+      const rolePermissions = ROLE_PERMISSIONS[user.role] || [];
+      rolePermissions.forEach((perm) => permissions.add(perm));
+
+      // Tenant admin gets additional permissions
+      if (isTenantAdmin) {
+        permissions.add("organization.users.manage");
+        permissions.add("organization.settings.manage");
+      }
+    }
+
+    // Add custom user permissions
+    if (user.permissions && Array.isArray(user.permissions)) {
+      user.permissions.forEach((perm) => {
+        if (perm && typeof perm === "string") {
+          permissions.add(perm);
+        }
+      });
+    }
+
+    // Convert to sorted array
+    const permissionsArray = Array.from(permissions).sort();
 
     return {
-      permissions,
+      permissions: permissionsArray,
       success: true,
     };
   }

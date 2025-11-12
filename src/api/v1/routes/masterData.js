@@ -233,6 +233,13 @@ const driverDocumentUpload = multer({
 
 // ==================== DRIVERS ====================
 router.get(
+  "/tms-drivers",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getTmsDrivers
+);
+
+router.get(
   "/drivers",
   isAuthenticated,
   requirePermission("master_data.view"),
@@ -1020,6 +1027,64 @@ router.post(
     limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   }).single("file"),
   MasterDataController.uploadVehicleDocument
+);
+
+// Permanent Assignments routes
+router.get(
+  "/permanent-assignments",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getAllPermanentAssignments
+);
+
+router.post(
+  "/permanent-assignments",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.createPermanentAssignment
+);
+
+router.patch(
+  "/permanent-assignments/:id",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updatePermanentAssignment
+);
+
+router.delete(
+  "/permanent-assignments/:id",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deletePermanentAssignment
+);
+
+// Permanent Jobs routes
+router.get(
+  "/permanent-jobs",
+  isAuthenticated,
+  requirePermission("master_data.view"),
+  MasterDataController.getAllPermanentJobs
+);
+
+router.post(
+  "/permanent-jobs",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.createPermanentJob
+);
+
+router.patch(
+  "/permanent-jobs/:id",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.updatePermanentJob
+);
+
+router.delete(
+  "/permanent-jobs/:id",
+  isAuthenticated,
+  requirePermission("master_data.manage"),
+  MasterDataController.deletePermanentJob
 );
 
 // All master data routes require authentication and permission

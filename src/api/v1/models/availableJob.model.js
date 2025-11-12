@@ -1,52 +1,52 @@
 const mongoose = require("mongoose");
 
-const AvailabilitySchema = new mongoose.Schema(
+const AvailableJobSchema = new mongoose.Schema(
   {
     date: {
       type: String, // ISO date (YYYY-MM-DD)
       required: true,
       index: true,
     },
-    driverId: {
+    boardType: {
+      type: String,
+      enum: ["PUD", "LINEHAUL"],
+      required: true,
+      index: true,
+    },
+    customerId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Driver",
+      ref: "Customer",
       default: null,
       index: true,
     },
-    driverName: {
+    customerName: {
       type: String,
       trim: true,
       maxlength: 200,
       default: null,
     },
-    companyName: {
+    origin: {
       type: String,
       trim: true,
       maxlength: 200,
       default: null,
     },
-    vehicleType: {
+    destination: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: null,
+    },
+    vehicleTypeRequired: {
       type: String,
       trim: true,
       maxlength: 100,
       default: null,
     },
-    bodyType: {
+    bodyTypeRequired: {
       type: String,
       trim: true,
       maxlength: 100,
-      default: null,
-    },
-    currentLocation: {
-      type: String,
-      trim: true,
-      maxlength: 200,
-      default: null,
-    },
-    destinationWanted: {
-      type: String,
-      trim: true,
-      maxlength: 200,
       default: null,
     },
     notes: {
@@ -71,17 +71,17 @@ const AvailabilitySchema = new mongoose.Schema(
 );
 
 // Compound indexes
-AvailabilitySchema.index({ date: 1, organizationId: 1 });
-AvailabilitySchema.index({ date: 1, driverId: 1, organizationId: 1 }); // For duplicate detection
-AvailabilitySchema.index({ status: 1 });
+AvailableJobSchema.index({ date: 1, boardType: 1, organizationId: 1 });
+AvailableJobSchema.index({ date: 1, boardType: 1, customerId: 1, organizationId: 1 }); // For duplicate detection
+AvailableJobSchema.index({ status: 1 });
 
-// Virtual to populate driver
-AvailabilitySchema.virtual("driver", {
-  ref: "Driver",
-  localField: "driverId",
+// Virtual to populate customer
+AvailableJobSchema.virtual("customer", {
+  ref: "Customer",
+  localField: "customerId",
   foreignField: "_id",
   justOne: true,
 });
 
-module.exports = mongoose.model("Availability", AvailabilitySchema);
+module.exports = mongoose.model("AvailableJob", AvailableJobSchema);
 

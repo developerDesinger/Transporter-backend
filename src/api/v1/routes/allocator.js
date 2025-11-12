@@ -25,6 +25,22 @@ router.get(
   AllocatorController.getRowsByRange
 );
 
+// POST /api/v1/allocator-rows/bulk-from-permanent-jobs - Bulk create from permanent jobs
+// This route must come before /allocator-rows to avoid route conflicts
+router.post(
+  "/allocator-rows/bulk-from-permanent-jobs",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.bulkCreateFromPermanentJobs
+);
+
+// POST /api/v1/allocator-rows/bulk-from-permanent - Bulk create from permanent assignments
+// This route must come before /allocator-rows to avoid route conflicts
+router.post(
+  "/allocator-rows/bulk-from-permanent",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.bulkCreateFromPermanentAssignments
+);
+
 // POST /api/v1/allocator-rows - Create new row
 router.post(
   "/allocator-rows",
@@ -192,6 +208,65 @@ router.get(
   "/availability",
   requirePermission("operations.allocator.view"),
   AllocatorController.getAvailability
+);
+
+// POST /api/v1/availability/bulk-add-drivers - Bulk add drivers to availability
+// This route must come before /availability/:id to avoid route conflicts
+router.post(
+  "/availability/bulk-add-drivers",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.bulkAddDriversToAvailability
+);
+
+// POST /api/v1/availability - Create availability record
+router.post(
+  "/availability",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.createAvailability
+);
+
+// PATCH /api/v1/availability/:id - Update availability record
+router.patch(
+  "/availability/:id",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.updateAvailability
+);
+
+// DELETE /api/v1/availability/:id - Delete availability record
+router.delete(
+  "/availability/:id",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.deleteAvailability
+);
+
+// ==================== AVAILABLE JOBS ====================
+
+// GET /api/v1/available-jobs - Get available jobs
+router.get(
+  "/available-jobs",
+  requirePermission("operations.allocator.view"),
+  AllocatorController.getAvailableJobs
+);
+
+// POST /api/v1/available-jobs - Create available job
+router.post(
+  "/available-jobs",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.createAvailableJob
+);
+
+// PATCH /api/v1/available-jobs/:id - Update available job
+router.patch(
+  "/available-jobs/:id",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.updateAvailableJob
+);
+
+// DELETE /api/v1/available-jobs/:id - Delete available job
+router.delete(
+  "/available-jobs/:id",
+  requirePermission("operations.allocator.manage"),
+  AllocatorController.deleteAvailableJob
 );
 
 // ==================== NOTIFICATIONS ====================

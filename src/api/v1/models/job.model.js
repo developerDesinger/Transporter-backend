@@ -100,6 +100,34 @@ const JobSchema = new mongoose.Schema(
       ref: "Organization",
       index: true,
     },
+    // Driver pay fields
+    driverPayStatus: {
+      type: String,
+      enum: ["UNPOSTED", "POSTED", "VOID"],
+      default: "UNPOSTED",
+      index: true,
+    },
+    driverPayDeferralUntil: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    driverPayrunId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PayRun",
+      default: null,
+      index: true,
+    },
+    driverPayPostedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    completedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );

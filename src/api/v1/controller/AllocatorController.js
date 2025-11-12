@@ -68,6 +68,16 @@ class AllocatorController {
     return res.status(200).json(result);
   });
 
+  static bulkCreateFromPermanentJobs = catchAsyncHandler(async (req, res) => {
+    const result = await AllocatorService.bulkCreateFromPermanentJobs(req.body, req.user);
+    return res.status(200).json(result);
+  });
+
+  static bulkCreateFromPermanentAssignments = catchAsyncHandler(async (req, res) => {
+    const result = await AllocatorService.bulkCreateFromPermanentAssignments(req.body, req.user);
+    return res.status(200).json(result);
+  });
+
   // ==================== MASTER DATA ====================
 
   static getEligibleCustomers = catchAsyncHandler(async (req, res) => {
@@ -118,6 +128,65 @@ class AllocatorController {
     const { date } = req.query;
     const availabilities = await AllocatorService.getAvailability(date, req.user);
     return res.status(200).json(availabilities);
+  });
+
+  static createAvailability = catchAsyncHandler(async (req, res) => {
+    const result = await AllocatorService.createAvailability(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static updateAvailability = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await AllocatorService.updateAvailability(id, req.body, req.user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static deleteAvailability = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await AllocatorService.deleteAvailability(id, req.user);
+    return res.status(200).json(result);
+  });
+
+  static bulkAddDriversToAvailability = catchAsyncHandler(async (req, res) => {
+    const result = await AllocatorService.bulkAddDriversToAvailability(req.body, req.user);
+    return res.status(200).json(result);
+  });
+
+  // ==================== AVAILABLE JOBS ====================
+
+  static getAvailableJobs = catchAsyncHandler(async (req, res) => {
+    const { date, boardType } = req.query;
+    const jobs = await AllocatorService.getAvailableJobs(date, boardType, req.user);
+    return res.status(200).json(jobs);
+  });
+
+  static createAvailableJob = catchAsyncHandler(async (req, res) => {
+    const result = await AllocatorService.createAvailableJob(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static updateAvailableJob = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await AllocatorService.updateAvailableJob(id, req.body, req.user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static deleteAvailableJob = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await AllocatorService.deleteAvailableJob(id, req.user);
+    return res.status(200).json(result);
   });
 
   // ==================== ATTACHMENTS ====================

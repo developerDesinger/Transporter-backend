@@ -14,11 +14,26 @@ const PayRunDriverSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    gross: {
+      type: Number,
+      required: true,
+      default: 0,
+    }, // Total from jobs
+    adjustments: {
+      type: Number,
+      required: true,
+      default: 0,
+    }, // Total from adjustments (signed)
+    netPay: {
+      type: Number,
+      required: true,
+      default: 0,
+    }, // gross + adjustments
     totalAmount: {
       type: Number,
       required: true,
       default: 0,
-    }, // Total amount for this driver in this pay run
+    }, // Alias for netPay (backward compatibility)
     hours: {
       type: Number,
       default: 0,

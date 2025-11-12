@@ -36,6 +36,10 @@ const AllocatorRowSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    serviceCode: {
+      type: String,
+      default: null,
+    },
     pickupSuburb: {
       type: String,
       default: null,

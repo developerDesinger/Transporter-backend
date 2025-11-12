@@ -5,12 +5,15 @@ const Attachment = require("../models/attachment.model");
 const DriverUsage = require("../models/driverUsage.model");
 const AllocatorPreferences = require("../models/allocatorPreferences.model");
 const Availability = require("../models/availability.model");
+const AvailableJob = require("../models/availableJob.model");
 const Customer = require("../models/customer.model");
 const Driver = require("../models/driver.model");
 const VehicleType = require("../models/vehicleType.model");
 const Party = require("../models/party.model");
 const Ancillary = require("../models/ancillary.model");
 const RateCard = require("../models/rateCard.model");
+const PermanentJob = require("../models/permanentJob.model");
+const PermanentAssignment = require("../models/permanentAssignment.model");
 const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
 const mongoose = require("mongoose");
@@ -1094,7 +1097,7 @@ class AllocatorService {
   // ==================== AVAILABILITY ====================
 
   /**
-   * Get driver availability for a date
+   * Get driver availability records for a date
    * @param {string} date - ISO date string (YYYY-MM-DD)
    * @param {Object} user - Authenticated user
    * @returns {Array} Array of availability objects
@@ -1104,34 +1107,956 @@ class AllocatorService {
       throw new AppError("date query parameter is required", HttpStatusCodes.BAD_REQUEST);
     }
 
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new AppError(
+        "date must be in YYYY-MM-DD format",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
     const filter = { date };
 
+    // Multi-tenant support
     if (user.activeOrganizationId) {
       filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
     }
 
     const availabilities = await Availability.find(filter)
-      .populate("driverId", "partyId")
-      .sort({ createdAt: -1 })
+      .populate("driverId", "partyId driverCode")
+      .populate({
+        path: "driverId",
+        populate: {
+          path: "party",
+          select: "firstName lastName companyName",
+        },
+      })
+      .sort({ createdAt: 1 })
       .lean();
 
     return availabilities.map((avail) => ({
       id: avail._id.toString(),
-      driverId: avail.driverId?._id.toString() || null,
       date: avail.date,
+      driverId: avail.driverId ? avail.driverId._id.toString() : null,
+      driverName: avail.driverName || 
+        (avail.driverId?.party 
+          ? `${avail.driverId.party.firstName || ""} ${avail.driverId.party.lastName || ""}`.trim() || 
+            avail.driverId.party.companyName
+          : null),
+      companyName: avail.companyName || 
+        (avail.driverId?.party?.companyName || null),
       vehicleType: avail.vehicleType,
       bodyType: avail.bodyType,
       currentLocation: avail.currentLocation,
       destinationWanted: avail.destinationWanted,
       notes: avail.notes,
-      isAvailable: avail.isAvailable,
-      driver: avail.driverId?.partyId
-        ? {
-            id: avail.driverId._id.toString(),
-            partyId: avail.driverId.partyId?.toString() || null,
-          }
-        : null,
+      status: avail.status || "AVAILABLE",
+      createdAt: avail.createdAt.toISOString(),
+      updatedAt: avail.updatedAt.toISOString(),
     }));
+  }
+
+  /**
+   * Create a new availability record
+   * @param {Object} data - Availability data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created availability record
+   */
+  static async createAvailability(data, user) {
+    const Driver = require("../models/driver.model");
+    const errors = [];
+
+    // Validation
+    if (!data.date) {
+      errors.push({ field: "date", message: "Date is required" });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(data.date)) {
+      errors.push({
+        field: "date",
+        message: "Date must be in YYYY-MM-DD format",
+      });
+    }
+
+    if (data.status && !["AVAILABLE", "ASSIGNED", "CANCELLED"].includes(data.status)) {
+      errors.push({
+        field: "status",
+        message: "Status must be AVAILABLE, ASSIGNED, or CANCELLED",
+      });
+    }
+
+    // String length validations
+    if (data.driverName && data.driverName.length > 200) {
+      errors.push({
+        field: "driverName",
+        message: "Driver name must be 200 characters or less",
+      });
+    }
+
+    if (data.companyName && data.companyName.length > 200) {
+      errors.push({
+        field: "companyName",
+        message: "Company name must be 200 characters or less",
+      });
+    }
+
+    if (data.vehicleType && data.vehicleType.length > 100) {
+      errors.push({
+        field: "vehicleType",
+        message: "Vehicle type must be 100 characters or less",
+      });
+    }
+
+    if (data.bodyType && data.bodyType.length > 100) {
+      errors.push({
+        field: "bodyType",
+        message: "Body type must be 100 characters or less",
+      });
+    }
+
+    if (data.currentLocation && data.currentLocation.length > 200) {
+      errors.push({
+        field: "currentLocation",
+        message: "Current location must be 200 characters or less",
+      });
+    }
+
+    if (data.destinationWanted && data.destinationWanted.length > 200) {
+      errors.push({
+        field: "destinationWanted",
+        message: "Destination wanted must be 200 characters or less",
+      });
+    }
+
+    if (data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate driver if driverId provided
+    let finalDriverName = data.driverName;
+    if (data.driverId) {
+      if (!mongoose.Types.ObjectId.isValid(data.driverId)) {
+        throw new AppError("Invalid driver ID", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      const driver = await Driver.findById(data.driverId)
+        .populate("party")
+        .lean();
+
+      if (!driver) {
+        throw new AppError("Driver not found", HttpStatusCodes.NOT_FOUND);
+      }
+
+      // Auto-populate driverName if not provided
+      if (!finalDriverName && driver.party) {
+        if (driver.party.firstName && driver.party.lastName) {
+          finalDriverName = `${driver.party.firstName} ${driver.party.lastName}`.trim();
+        } else if (driver.party.companyName) {
+          finalDriverName = driver.party.companyName;
+        }
+      }
+
+      // Auto-populate companyName if not provided
+      if (!data.companyName && driver.party?.companyName) {
+        data.companyName = driver.party.companyName;
+      }
+    }
+
+    // Check for duplicate (same date + driverId + organizationId)
+    if (data.driverId) {
+      const duplicateFilter = {
+        date: data.date,
+        driverId: new mongoose.Types.ObjectId(data.driverId),
+        organizationId: user.activeOrganizationId || null,
+      };
+
+      const existing = await Availability.findOne(duplicateFilter);
+      if (existing) {
+        throw new AppError(
+          "Availability record already exists for this driver and date",
+          HttpStatusCodes.CONFLICT
+        );
+      }
+    }
+
+    // Create availability record
+    const availability = await Availability.create({
+      date: data.date,
+      driverId: data.driverId ? new mongoose.Types.ObjectId(data.driverId) : null,
+      driverName: finalDriverName ? finalDriverName.trim() : null,
+      companyName: data.companyName ? data.companyName.trim() : null,
+      vehicleType: data.vehicleType ? data.vehicleType.trim() : null,
+      bodyType: data.bodyType ? data.bodyType.trim() : null,
+      currentLocation: data.currentLocation ? data.currentLocation.trim() : null,
+      destinationWanted: data.destinationWanted ? data.destinationWanted.trim() : null,
+      notes: data.notes ? data.notes.trim() : null,
+      status: data.status || "AVAILABLE",
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: availability._id.toString(),
+      date: availability.date,
+      driverId: availability.driverId ? availability.driverId.toString() : null,
+      driverName: availability.driverName,
+      companyName: availability.companyName,
+      vehicleType: availability.vehicleType,
+      bodyType: availability.bodyType,
+      currentLocation: availability.currentLocation,
+      destinationWanted: availability.destinationWanted,
+      notes: availability.notes,
+      status: availability.status,
+      createdAt: availability.createdAt.toISOString(),
+      updatedAt: availability.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Update an availability record
+   * @param {string} availabilityId - Availability record ID
+   * @param {Object} data - Update data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Updated availability record
+   */
+  static async updateAvailability(availabilityId, data, user) {
+    const Driver = require("../models/driver.model");
+    const errors = [];
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(availabilityId)) {
+      throw new AppError("Invalid availability record ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find availability record
+    const availability = await Availability.findOne({
+      _id: new mongoose.Types.ObjectId(availabilityId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!availability) {
+      throw new AppError("Availability record not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate status if provided
+    if (data.status !== undefined && !["AVAILABLE", "ASSIGNED", "CANCELLED"].includes(data.status)) {
+      errors.push({
+        field: "status",
+        message: "Status must be AVAILABLE, ASSIGNED, or CANCELLED",
+      });
+    }
+
+    // String length validations
+    if (data.driverName !== undefined && data.driverName && data.driverName.length > 200) {
+      errors.push({
+        field: "driverName",
+        message: "Driver name must be 200 characters or less",
+      });
+    }
+
+    if (data.companyName !== undefined && data.companyName && data.companyName.length > 200) {
+      errors.push({
+        field: "companyName",
+        message: "Company name must be 200 characters or less",
+      });
+    }
+
+    if (data.vehicleType !== undefined && data.vehicleType && data.vehicleType.length > 100) {
+      errors.push({
+        field: "vehicleType",
+        message: "Vehicle type must be 100 characters or less",
+      });
+    }
+
+    if (data.bodyType !== undefined && data.bodyType && data.bodyType.length > 100) {
+      errors.push({
+        field: "bodyType",
+        message: "Body type must be 100 characters or less",
+      });
+    }
+
+    if (data.currentLocation !== undefined && data.currentLocation && data.currentLocation.length > 200) {
+      errors.push({
+        field: "currentLocation",
+        message: "Current location must be 200 characters or less",
+      });
+    }
+
+    if (data.destinationWanted !== undefined && data.destinationWanted && data.destinationWanted.length > 200) {
+      errors.push({
+        field: "destinationWanted",
+        message: "Destination wanted must be 200 characters or less",
+      });
+    }
+
+    if (data.notes !== undefined && data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate driver if driverId is being updated
+    let finalDriverName = data.driverName;
+    if (data.driverId !== undefined) {
+      if (data.driverId) {
+        if (!mongoose.Types.ObjectId.isValid(data.driverId)) {
+          throw new AppError("Invalid driver ID", HttpStatusCodes.BAD_REQUEST);
+        }
+
+        const driver = await Driver.findById(data.driverId)
+          .populate("party")
+          .lean();
+
+        if (!driver) {
+          throw new AppError("Driver not found", HttpStatusCodes.NOT_FOUND);
+        }
+
+        // Auto-populate driverName if not provided
+        if (!finalDriverName && driver.party) {
+          if (driver.party.firstName && driver.party.lastName) {
+            finalDriverName = `${driver.party.firstName} ${driver.party.lastName}`.trim();
+          } else if (driver.party.companyName) {
+            finalDriverName = driver.party.companyName;
+          }
+        }
+
+        // Auto-populate companyName if not provided
+        if (!data.companyName && driver.party?.companyName) {
+          data.companyName = driver.party.companyName;
+        }
+      }
+    }
+
+    // Update only provided fields
+    if (data.driverId !== undefined) {
+      availability.driverId = data.driverId ? new mongoose.Types.ObjectId(data.driverId) : null;
+    }
+    if (data.driverName !== undefined) {
+      availability.driverName = finalDriverName ? finalDriverName.trim() : null;
+    }
+    if (data.companyName !== undefined) {
+      availability.companyName = data.companyName ? data.companyName.trim() : null;
+    }
+    if (data.vehicleType !== undefined) {
+      availability.vehicleType = data.vehicleType ? data.vehicleType.trim() : null;
+    }
+    if (data.bodyType !== undefined) {
+      availability.bodyType = data.bodyType ? data.bodyType.trim() : null;
+    }
+    if (data.currentLocation !== undefined) {
+      availability.currentLocation = data.currentLocation ? data.currentLocation.trim() : null;
+    }
+    if (data.destinationWanted !== undefined) {
+      availability.destinationWanted = data.destinationWanted ? data.destinationWanted.trim() : null;
+    }
+    if (data.notes !== undefined) {
+      availability.notes = data.notes ? data.notes.trim() : null;
+    }
+    if (data.status !== undefined) {
+      availability.status = data.status;
+    }
+
+    await availability.save();
+
+    return {
+      id: availability._id.toString(),
+      date: availability.date,
+      driverId: availability.driverId ? availability.driverId.toString() : null,
+      driverName: availability.driverName,
+      companyName: availability.companyName,
+      vehicleType: availability.vehicleType,
+      bodyType: availability.bodyType,
+      currentLocation: availability.currentLocation,
+      destinationWanted: availability.destinationWanted,
+      notes: availability.notes,
+      status: availability.status,
+      createdAt: availability.createdAt.toISOString(),
+      updatedAt: availability.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Delete an availability record (soft delete - set status to CANCELLED)
+   * @param {string} availabilityId - Availability record ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Success message
+   */
+  static async deleteAvailability(availabilityId, user) {
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(availabilityId)) {
+      throw new AppError("Invalid availability record ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find availability record
+    const availability = await Availability.findOne({
+      _id: new mongoose.Types.ObjectId(availabilityId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!availability) {
+      throw new AppError("Availability record not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Soft delete (set status to CANCELLED)
+    availability.status = "CANCELLED";
+    await availability.save();
+
+    return {
+      success: true,
+      message: "Availability record deleted successfully",
+    };
+  }
+
+  // ==================== AVAILABLE JOBS ====================
+
+  /**
+   * Get available jobs for a date and board type
+   * @param {string} date - ISO date string (YYYY-MM-DD)
+   * @param {string} boardType - Board type (PUD or LINEHAUL)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of available job objects
+   */
+  static async getAvailableJobs(date, boardType, user) {
+    const errors = [];
+
+    if (!date) {
+      errors.push({ field: "date", message: "Date is required" });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      errors.push({
+        field: "date",
+        message: "Date must be in YYYY-MM-DD format",
+      });
+    }
+
+    if (!boardType) {
+      errors.push({ field: "boardType", message: "Board type is required" });
+    } else if (!["PUD", "LINEHAUL"].includes(boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "Board type must be PUD or LINEHAUL",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    const filter = { date, boardType };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    const availableJobs = await AvailableJob.find(filter)
+      .populate("customerId", "partyId")
+      .populate({
+        path: "customerId",
+        populate: {
+          path: "party",
+          select: "companyName",
+        },
+      })
+      .sort({ createdAt: 1 })
+      .lean();
+
+    return availableJobs.map((job) => ({
+      id: job._id.toString(),
+      date: job.date,
+      boardType: job.boardType,
+      customerId: job.customerId ? job.customerId._id.toString() : null,
+      customerName: job.customerName || 
+        (job.customerId?.party?.companyName || null),
+      origin: job.origin,
+      destination: job.destination,
+      vehicleTypeRequired: job.vehicleTypeRequired,
+      bodyTypeRequired: job.bodyTypeRequired,
+      notes: job.notes,
+      status: job.status || "AVAILABLE",
+      createdAt: job.createdAt.toISOString(),
+      updatedAt: job.updatedAt.toISOString(),
+    }));
+  }
+
+  /**
+   * Create a new available job record
+   * @param {Object} data - Available job data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created available job record
+   */
+  static async createAvailableJob(data, user) {
+    const Customer = require("../models/customer.model");
+    const errors = [];
+
+    // Validation
+    if (!data.date) {
+      errors.push({ field: "date", message: "Date is required" });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(data.date)) {
+      errors.push({
+        field: "date",
+        message: "Date must be in YYYY-MM-DD format",
+      });
+    }
+
+    if (!data.boardType) {
+      errors.push({ field: "boardType", message: "Board type is required" });
+    } else if (!["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "Board type must be PUD or LINEHAUL",
+      });
+    }
+
+    if (data.status && !["AVAILABLE", "ASSIGNED", "CANCELLED"].includes(data.status)) {
+      errors.push({
+        field: "status",
+        message: "Status must be AVAILABLE, ASSIGNED, or CANCELLED",
+      });
+    }
+
+    // Validate customer - either customerId or customerName must be provided
+    if (!data.customerId && !data.customerName) {
+      errors.push({
+        field: "customerName",
+        message: "Either customerId or customerName must be provided",
+      });
+    }
+
+    // String length validations
+    if (data.customerName && data.customerName.length > 200) {
+      errors.push({
+        field: "customerName",
+        message: "Customer name must be 200 characters or less",
+      });
+    }
+
+    if (data.origin && data.origin.length > 200) {
+      errors.push({
+        field: "origin",
+        message: "Origin must be 200 characters or less",
+      });
+    }
+
+    if (data.destination && data.destination.length > 200) {
+      errors.push({
+        field: "destination",
+        message: "Destination must be 200 characters or less",
+      });
+    }
+
+    if (data.vehicleTypeRequired && data.vehicleTypeRequired.length > 100) {
+      errors.push({
+        field: "vehicleTypeRequired",
+        message: "Vehicle type required must be 100 characters or less",
+      });
+    }
+
+    if (data.bodyTypeRequired && data.bodyTypeRequired.length > 100) {
+      errors.push({
+        field: "bodyTypeRequired",
+        message: "Body type required must be 100 characters or less",
+      });
+    }
+
+    if (data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate customer if customerId provided
+    let finalCustomerName = data.customerName;
+    if (data.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(data.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      const customer = await Customer.findById(data.customerId)
+        .populate("party")
+        .lean();
+
+      if (!customer) {
+        throw new AppError("Customer not found", HttpStatusCodes.NOT_FOUND);
+      }
+
+      // Auto-populate customerName if not provided
+      if (!finalCustomerName && customer.party) {
+        finalCustomerName = customer.party.companyName || null;
+      }
+    }
+
+    // Check for duplicate (same date + boardType + customerId + organizationId)
+    if (data.customerId) {
+      const duplicateFilter = {
+        date: data.date,
+        boardType: data.boardType,
+        customerId: new mongoose.Types.ObjectId(data.customerId),
+        organizationId: user.activeOrganizationId || null,
+      };
+
+      const existing = await AvailableJob.findOne(duplicateFilter);
+      if (existing) {
+        throw new AppError(
+          "Available job already exists for this customer, date, and board type",
+          HttpStatusCodes.CONFLICT
+        );
+      }
+    }
+
+    // Create available job record
+    const availableJob = await AvailableJob.create({
+      date: data.date,
+      boardType: data.boardType,
+      customerId: data.customerId ? new mongoose.Types.ObjectId(data.customerId) : null,
+      customerName: finalCustomerName ? finalCustomerName.trim() : null,
+      origin: data.origin ? data.origin.trim() : null,
+      destination: data.destination ? data.destination.trim() : null,
+      vehicleTypeRequired: data.vehicleTypeRequired ? data.vehicleTypeRequired.trim() : null,
+      bodyTypeRequired: data.bodyTypeRequired ? data.bodyTypeRequired.trim() : null,
+      notes: data.notes ? data.notes.trim() : null,
+      status: data.status || "AVAILABLE",
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: availableJob._id.toString(),
+      date: availableJob.date,
+      boardType: availableJob.boardType,
+      customerId: availableJob.customerId ? availableJob.customerId.toString() : null,
+      customerName: availableJob.customerName,
+      origin: availableJob.origin,
+      destination: availableJob.destination,
+      vehicleTypeRequired: availableJob.vehicleTypeRequired,
+      bodyTypeRequired: availableJob.bodyTypeRequired,
+      notes: availableJob.notes,
+      status: availableJob.status,
+      createdAt: availableJob.createdAt.toISOString(),
+      updatedAt: availableJob.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Update an available job record
+   * @param {string} availableJobId - Available job ID
+   * @param {Object} data - Update data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Updated available job record
+   */
+  static async updateAvailableJob(availableJobId, data, user) {
+    const Customer = require("../models/customer.model");
+    const errors = [];
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(availableJobId)) {
+      throw new AppError("Invalid available job ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find available job record
+    const availableJob = await AvailableJob.findOne({
+      _id: new mongoose.Types.ObjectId(availableJobId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!availableJob) {
+      throw new AppError("Available job not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate status if provided
+    if (data.status !== undefined && !["AVAILABLE", "ASSIGNED", "CANCELLED"].includes(data.status)) {
+      errors.push({
+        field: "status",
+        message: "Status must be AVAILABLE, ASSIGNED, or CANCELLED",
+      });
+    }
+
+    // String length validations
+    if (data.customerName !== undefined && data.customerName && data.customerName.length > 200) {
+      errors.push({
+        field: "customerName",
+        message: "Customer name must be 200 characters or less",
+      });
+    }
+
+    if (data.origin !== undefined && data.origin && data.origin.length > 200) {
+      errors.push({
+        field: "origin",
+        message: "Origin must be 200 characters or less",
+      });
+    }
+
+    if (data.destination !== undefined && data.destination && data.destination.length > 200) {
+      errors.push({
+        field: "destination",
+        message: "Destination must be 200 characters or less",
+      });
+    }
+
+    if (data.vehicleTypeRequired !== undefined && data.vehicleTypeRequired && data.vehicleTypeRequired.length > 100) {
+      errors.push({
+        field: "vehicleTypeRequired",
+        message: "Vehicle type required must be 100 characters or less",
+      });
+    }
+
+    if (data.bodyTypeRequired !== undefined && data.bodyTypeRequired && data.bodyTypeRequired.length > 100) {
+      errors.push({
+        field: "bodyTypeRequired",
+        message: "Body type required must be 100 characters or less",
+      });
+    }
+
+    if (data.notes !== undefined && data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate customer if customerId is being updated
+    let finalCustomerName = data.customerName;
+    if (data.customerId !== undefined) {
+      if (data.customerId) {
+        if (!mongoose.Types.ObjectId.isValid(data.customerId)) {
+          throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+        }
+
+        const customer = await Customer.findById(data.customerId)
+          .populate("party")
+          .lean();
+
+        if (!customer) {
+          throw new AppError("Customer not found", HttpStatusCodes.NOT_FOUND);
+        }
+
+        // Auto-populate customerName if not provided
+        if (!finalCustomerName && customer.party) {
+          finalCustomerName = customer.party.companyName || null;
+        }
+      }
+    }
+
+    // Update only provided fields
+    if (data.customerId !== undefined) {
+      availableJob.customerId = data.customerId ? new mongoose.Types.ObjectId(data.customerId) : null;
+    }
+    if (data.customerName !== undefined) {
+      availableJob.customerName = finalCustomerName ? finalCustomerName.trim() : null;
+    }
+    if (data.origin !== undefined) {
+      availableJob.origin = data.origin ? data.origin.trim() : null;
+    }
+    if (data.destination !== undefined) {
+      availableJob.destination = data.destination ? data.destination.trim() : null;
+    }
+    if (data.vehicleTypeRequired !== undefined) {
+      availableJob.vehicleTypeRequired = data.vehicleTypeRequired ? data.vehicleTypeRequired.trim() : null;
+    }
+    if (data.bodyTypeRequired !== undefined) {
+      availableJob.bodyTypeRequired = data.bodyTypeRequired ? data.bodyTypeRequired.trim() : null;
+    }
+    if (data.notes !== undefined) {
+      availableJob.notes = data.notes ? data.notes.trim() : null;
+    }
+    if (data.status !== undefined) {
+      availableJob.status = data.status;
+    }
+
+    await availableJob.save();
+
+    return {
+      id: availableJob._id.toString(),
+      date: availableJob.date,
+      boardType: availableJob.boardType,
+      customerId: availableJob.customerId ? availableJob.customerId.toString() : null,
+      customerName: availableJob.customerName,
+      origin: availableJob.origin,
+      destination: availableJob.destination,
+      vehicleTypeRequired: availableJob.vehicleTypeRequired,
+      bodyTypeRequired: availableJob.bodyTypeRequired,
+      notes: availableJob.notes,
+      status: availableJob.status,
+      createdAt: availableJob.createdAt.toISOString(),
+      updatedAt: availableJob.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Delete an available job record (soft delete - set status to CANCELLED)
+   * @param {string} availableJobId - Available job ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Success message
+   */
+  static async deleteAvailableJob(availableJobId, user) {
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(availableJobId)) {
+      throw new AppError("Invalid available job ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find available job record
+    const availableJob = await AvailableJob.findOne({
+      _id: new mongoose.Types.ObjectId(availableJobId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!availableJob) {
+      throw new AppError("Available job not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Soft delete (set status to CANCELLED)
+    availableJob.status = "CANCELLED";
+    await availableJob.save();
+
+    return {
+      success: true,
+      message: "Available job deleted successfully",
+    };
+  }
+
+  // ==================== BULK ADD DRIVERS TO AVAILABILITY ====================
+
+  /**
+   * Bulk add all compliant and active drivers to availability for a date
+   * @param {Object} data - Request data (date)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created and skipped counts
+   */
+  static async bulkAddDriversToAvailability(data, user) {
+    const errors = [];
+
+    // Validation
+    if (!data.date) {
+      errors.push({ field: "date", message: "Date is required" });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(data.date)) {
+      errors.push({
+        field: "date",
+        message: "Date must be in YYYY-MM-DD format",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Fetch all compliant and active drivers
+    // Note: Driver model doesn't have organizationId directly, so we query all compliant drivers
+    // The availability records will be filtered by organizationId
+    const drivers = await Driver.find({
+      $or: [
+        { driverStatus: "COMPLIANT" },
+        { complianceStatus: "COMPLIANT" },
+      ],
+      isActive: true,
+    })
+      .populate("party")
+      .lean();
+
+    if (drivers.length === 0) {
+      return {
+        success: true,
+        created: 0,
+        skipped: 0,
+        message: "No compliant and active drivers found",
+      };
+    }
+
+    const organizationId = user.activeOrganizationId || null;
+    let created = 0;
+    let skipped = 0;
+
+    // Process each driver
+    for (const driver of drivers) {
+      // Check if availability record already exists
+      const existingQuery = {
+        date: data.date,
+        organizationId: organizationId,
+      };
+
+      // Only add driverId to query if driver has an _id
+      if (driver._id) {
+        existingQuery.driverId = driver._id;
+      } else {
+        // Skip if driver doesn't have an ID
+        skipped++;
+        continue;
+      }
+
+      const existing = await Availability.findOne(existingQuery);
+
+      if (existing) {
+        skipped++;
+        continue; // Skip if already exists
+      }
+
+      // Auto-populate driverName from party
+      let driverName = null;
+      if (driver.party) {
+        if (driver.party.firstName && driver.party.lastName) {
+          driverName = `${driver.party.firstName} ${driver.party.lastName}`.trim();
+        } else if (driver.party.companyName) {
+          driverName = driver.party.companyName;
+        }
+      }
+
+      // Get vehicle type from driver's fleet (first one if available)
+      let vehicleType = null;
+      if (driver.vehicleTypesInFleet && driver.vehicleTypesInFleet.length > 0) {
+        vehicleType = driver.vehicleTypesInFleet[0];
+      }
+
+      // Create availability record
+      const availability = await Availability.create({
+        date: data.date,
+        driverId: driver._id,
+        driverName: driverName,
+        companyName: driver.party?.companyName || null,
+        vehicleType: vehicleType,
+        status: "AVAILABLE",
+        organizationId: organizationId,
+      });
+
+      created++;
+    }
+
+    return {
+      success: true,
+      created,
+      skipped,
+      message: `Added ${created} driver(s), skipped ${skipped} already in list`,
+    };
   }
 
   // ==================== NOTIFICATIONS ====================
@@ -1270,6 +2195,415 @@ class AllocatorService {
     return {
       success: true,
       message: "Paperwork SMS requested",
+    };
+  }
+
+  // ==================== BULK CREATE FROM PERMANENT JOBS ====================
+
+  /**
+   * Bulk create allocator rows from permanent jobs
+   * @param {Object} data - Request data (boardType, date, jobIds)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created rows and skipped count
+   */
+  static async bulkCreateFromPermanentJobs(data, user) {
+    const errors = [];
+
+    // Validation
+    if (!data.boardType) {
+      errors.push({
+        field: "boardType",
+        message: "boardType is required",
+      });
+    } else if (!["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "boardType must be 'PUD' or 'LINEHAUL'",
+      });
+    }
+
+    if (!data.date) {
+      errors.push({
+        field: "date",
+        message: "date is required",
+      });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(data.date)) {
+      errors.push({
+        field: "date",
+        message: "date must be in YYYY-MM-DD format",
+      });
+    }
+
+    // Validate jobIds if provided
+    if (data.jobIds !== undefined) {
+      if (!Array.isArray(data.jobIds)) {
+        errors.push({
+          field: "jobIds",
+          message: "jobIds must be an array",
+        });
+      } else {
+        // Validate each jobId is a valid ObjectId
+        for (const jobId of data.jobIds) {
+          if (!mongoose.Types.ObjectId.isValid(jobId)) {
+            errors.push({
+              field: "jobIds",
+              message: `Invalid job ID: ${jobId}`,
+            });
+            break; // Only report first invalid ID
+          }
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Parse date and get day of week
+    // Parse as local date (not UTC) to match the user's timezone
+    const targetDate = new Date(data.date + "T00:00:00");
+    if (isNaN(targetDate.getTime())) {
+      throw new AppError("Invalid date", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const dayOfWeek = targetDate.getDay(); // 0 = Sunday, 6 = Saturday (local time)
+
+    // Build query for permanent jobs
+    const query = {
+      boardType: data.boardType,
+      isActive: true,
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      query.organizationId = user.activeOrganizationId;
+    } else {
+      query.organizationId = null;
+    }
+
+    // If jobIds provided, filter by them
+    if (data.jobIds && Array.isArray(data.jobIds) && data.jobIds.length > 0) {
+      query._id = {
+        $in: data.jobIds.map((id) => new mongoose.Types.ObjectId(id)),
+      };
+    }
+
+    // Fetch permanent jobs
+    const permanentJobs = await PermanentJob.find(query).lean();
+
+    if (permanentJobs.length === 0) {
+      return {
+        success: true,
+        created: [],
+        skipped: 0,
+        message: "No permanent jobs found",
+      };
+    }
+
+    const created = [];
+    let skipped = 0;
+
+    // Process each permanent job
+    for (const job of permanentJobs) {
+      // Filter by day of week
+      if (job.dayOfWeek !== null && job.dayOfWeek !== undefined) {
+        if (job.dayOfWeek !== dayOfWeek) {
+          skipped++;
+          continue; // Skip jobs that don't match the day of week
+        }
+      }
+
+      // Check if allocator row already exists
+      const existingQuery = {
+        date: data.date,
+        boardType: data.boardType,
+      };
+
+      // Multi-tenant support
+      if (user.activeOrganizationId) {
+        existingQuery.organizationId = user.activeOrganizationId;
+      } else {
+        existingQuery.organizationId = null;
+      }
+
+      // Add customerId and serviceCode to duplicate check if they exist
+      if (job.customerId) {
+        existingQuery.customerId = new mongoose.Types.ObjectId(job.customerId);
+      }
+
+      if (job.serviceCode) {
+        existingQuery.serviceCode = job.serviceCode;
+      }
+
+      const existingRow = await AllocatorRow.findOne(existingQuery);
+
+      if (existingRow) {
+        skipped++;
+        continue; // Skip if row already exists
+      }
+
+      // Map permanent job to allocator row
+      // Combine routeDescription and notes
+      let notes = null;
+      if (job.routeDescription) {
+        notes = job.routeDescription;
+        if (job.notes) {
+          notes = `${job.routeDescription}\n${job.notes}`;
+        }
+      } else if (job.notes) {
+        notes = job.notes;
+      }
+
+      const allocatorRowData = {
+        date: data.date,
+        boardType: data.boardType,
+        status: "Draft",
+        customerId: job.customerId ? new mongoose.Types.ObjectId(job.customerId) : null,
+        driverId: null,
+        vehicleType: job.defaultVehicleType || null,
+        pickupSuburb: job.pickupSuburb || null,
+        deliverySuburb: job.deliverySuburb || null,
+        startTime: job.defaultPickupTime || null,
+        finishTime: job.defaultDropTime || null,
+        pickupTime: job.defaultPickupTime || null,
+        deliveryTime: job.defaultDropTime || null,
+        deliveryDate: data.date,
+        notes: notes,
+        serviceCode: job.serviceCode || null,
+        jobStatus: null,
+        driverPay: null,
+        customerCharge: null,
+        fuelLevy: null,
+        jobId: null,
+        jobNumber: null,
+        ancillaryCharges: [],
+        driverFullName: null,
+        code: null,
+        organizationId: user.activeOrganizationId || null,
+      };
+
+      // Create allocator row
+      const newRow = await AllocatorRow.create(allocatorRowData);
+
+      // Format the created row for response
+      created.push({
+        id: newRow._id.toString(),
+        date: newRow.date,
+        boardType: newRow.boardType,
+        status: newRow.status,
+        customerId: newRow.customerId ? newRow.customerId.toString() : null,
+        driverId: null,
+        vehicleType: newRow.vehicleType,
+        pickupSuburb: newRow.pickupSuburb,
+        deliverySuburb: newRow.deliverySuburb,
+        serviceCode: newRow.serviceCode,
+        startTime: newRow.startTime,
+        finishTime: newRow.finishTime,
+        pickupTime: newRow.pickupTime,
+        deliveryTime: newRow.deliveryTime,
+        deliveryDate: newRow.deliveryDate,
+        notes: newRow.notes,
+        createdAt: newRow.createdAt.toISOString(),
+        updatedAt: newRow.updatedAt.toISOString(),
+      });
+    }
+
+    return {
+      success: true,
+      created,
+      skipped,
+      message: `Created ${created.length} row(s), skipped ${skipped} existing`,
+    };
+  }
+
+  /**
+   * Bulk create allocator rows from permanent assignments
+   * @param {Object} data - Request data (boardType, date)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created rows and skipped count
+   */
+  static async bulkCreateFromPermanentAssignments(data, user) {
+    const errors = [];
+
+    // Validation
+    if (!data.boardType) {
+      errors.push({
+        field: "boardType",
+        message: "boardType is required",
+      });
+    } else if (!["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "boardType must be 'PUD' or 'LINEHAUL'",
+      });
+    }
+
+    if (!data.date) {
+      errors.push({
+        field: "date",
+        message: "date is required",
+      });
+    } else if (!/^\d{4}-\d{2}-\d{2}$/.test(data.date)) {
+      errors.push({
+        field: "date",
+        message: "date must be in YYYY-MM-DD format",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Parse date and get day of week
+    // Parse as local date (not UTC) to match the user's timezone
+    const targetDate = new Date(data.date + "T00:00:00");
+    if (isNaN(targetDate.getTime())) {
+      throw new AppError("Invalid date", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const dayOfWeek = targetDate.getDay(); // 0 = Sunday, 6 = Saturday (local time)
+
+    // Build query for permanent assignments
+    const query = {
+      boardType: data.boardType,
+      isActive: true,
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      query.organizationId = user.activeOrganizationId;
+    } else {
+      query.organizationId = null;
+    }
+
+    // Fetch permanent assignments
+    const permanentAssignments = await PermanentAssignment.find(query).lean();
+
+    if (permanentAssignments.length === 0) {
+      return {
+        success: true,
+        created: [],
+        skipped: 0,
+        message: "No permanent assignments found",
+      };
+    }
+
+    const created = [];
+    let skipped = 0;
+
+    // Process each permanent assignment
+    for (const assignment of permanentAssignments) {
+      // Filter by day of week
+      if (assignment.dayOfWeek !== null && assignment.dayOfWeek !== undefined) {
+        if (assignment.dayOfWeek !== dayOfWeek) {
+          skipped++;
+          continue; // Skip assignments that don't match the day of week
+        }
+      }
+
+      // Check if allocator row already exists
+      const existingQuery = {
+        date: data.date,
+        boardType: data.boardType,
+        organizationId: user.activeOrganizationId || null,
+      };
+
+      // Add driverId to duplicate check
+      if (assignment.driverId) {
+        existingQuery.driverId = new mongoose.Types.ObjectId(assignment.driverId);
+      }
+
+      const existingRow = await AllocatorRow.findOne(existingQuery);
+
+      if (existingRow) {
+        skipped++;
+        continue; // Skip if row already exists
+      }
+
+      // Build notes field from routeCode, routeDescription, and notes
+      let notes = null;
+      if (assignment.routeCode && assignment.routeDescription) {
+        notes = `${assignment.routeCode}: ${assignment.routeDescription}`;
+        if (assignment.notes) {
+          notes += `\n${assignment.notes}`;
+        }
+      } else if (assignment.routeDescription) {
+        notes = assignment.routeDescription;
+        if (assignment.notes) {
+          notes += `\n${assignment.notes}`;
+        }
+      } else if (assignment.routeCode) {
+        notes = assignment.routeCode;
+        if (assignment.notes) {
+          notes += `\n${assignment.notes}`;
+        }
+      } else if (assignment.notes) {
+        notes = assignment.notes;
+      }
+
+      // Map permanent assignment to allocator row
+      const allocatorRowData = {
+        date: data.date,
+        boardType: data.boardType,
+        status: "Draft",
+        driverId: assignment.driverId ? new mongoose.Types.ObjectId(assignment.driverId) : null,
+        customerId: null,
+        vehicleType: assignment.defaultVehicleType || null,
+        pickupSuburb: assignment.startLocation || null,
+        deliverySuburb: assignment.endLocation || null,
+        startTime: assignment.defaultPickupTime || null,
+        finishTime: assignment.defaultDropTime || null,
+        pickupTime: assignment.defaultPickupTime || null,
+        deliveryTime: assignment.defaultDropTime || null,
+        deliveryDate: data.date,
+        notes: notes,
+        serviceCode: null,
+        jobStatus: null,
+        driverPay: null,
+        customerCharge: null,
+        fuelLevy: null,
+        jobId: null,
+        jobNumber: null,
+        ancillaryCharges: [],
+        driverFullName: null,
+        code: null,
+        organizationId: user.activeOrganizationId || null,
+      };
+
+      // Create allocator row
+      const newRow = await AllocatorRow.create(allocatorRowData);
+
+      // Format the created row for response
+      created.push({
+        id: newRow._id.toString(),
+        date: newRow.date,
+        boardType: newRow.boardType,
+        status: newRow.status,
+        driverId: newRow.driverId ? newRow.driverId.toString() : null,
+        customerId: null,
+        vehicleType: newRow.vehicleType,
+        pickupSuburb: newRow.pickupSuburb,
+        deliverySuburb: newRow.deliverySuburb,
+        startTime: newRow.startTime,
+        finishTime: newRow.finishTime,
+        pickupTime: newRow.pickupTime,
+        deliveryTime: newRow.deliveryTime,
+        deliveryDate: newRow.deliveryDate,
+        notes: newRow.notes,
+        createdAt: newRow.createdAt.toISOString(),
+        updatedAt: newRow.updatedAt.toISOString(),
+      });
+    }
+
+    return {
+      success: true,
+      created,
+      skipped,
+      message: `Created ${created.length} row(s), skipped ${skipped} existing`,
     };
   }
 }

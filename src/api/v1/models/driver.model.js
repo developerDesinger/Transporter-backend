@@ -74,9 +74,31 @@ const DriverSchema = new mongoose.Schema(
     workersCompPolicyNumber: { type: String },
     // Link to user account
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Payment terms fields
+    payTermsDays: {
+      type: Number,
+      enum: [7, 14, 21, 30],
+      default: 7,
+      index: true,
+    },
+    payAnchorDate: {
+      type: Date,
+      default: null,
+    },
+    remittanceEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: null,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
+
+// Indexes for efficient queries
+DriverSchema.index({ payTermsDays: 1 });
+DriverSchema.index({ isActive: 1, payTermsDays: 1 });
+DriverSchema.index({ driverStatus: 1, payTermsDays: 1 });
 
 // Virtual to populate party data
 DriverSchema.virtual("party", {

@@ -3,6 +3,11 @@ const catchAsyncHandler = require("../utils/catchAsyncHandler");
 
 class MasterDataController {
   // ==================== DRIVERS ====================
+  static getTmsDrivers = catchAsyncHandler(async (req, res) => {
+    const drivers = await MasterDataService.getTmsDrivers(req.query, req.user);
+    return res.status(200).json(drivers);
+  });
+
   static getAllDrivers = catchAsyncHandler(async (req, res) => {
     const drivers = await MasterDataService.getAllDrivers(req.query, req.user);
     
@@ -600,6 +605,64 @@ class MasterDataController {
   static getVehicleHistory = catchAsyncHandler(async (req, res) => {
     const { id } = req.params;
     const result = await MasterDataService.getVehicleHistory(id, req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  // ==================== PERMANENT ASSIGNMENTS ====================
+  static getAllPermanentAssignments = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getAllPermanentAssignments(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createPermanentAssignment = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createPermanentAssignment(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static updatePermanentAssignment = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.updatePermanentAssignment(id, req.body, req.user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static deletePermanentAssignment = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.deletePermanentAssignment(id, req.user);
+    return res.status(200).json(result);
+  });
+
+  // ==================== PERMANENT JOBS ====================
+  static getAllPermanentJobs = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.getAllPermanentJobs(req.query, req.user);
+    return res.status(200).json(result);
+  });
+
+  static createPermanentJob = catchAsyncHandler(async (req, res) => {
+    const result = await MasterDataService.createPermanentJob(req.body, req.user);
+    return res.status(201).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static updatePermanentJob = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.updatePermanentJob(id, req.body, req.user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static deletePermanentJob = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await MasterDataService.deletePermanentJob(id, req.user);
     return res.status(200).json(result);
   });
 

@@ -31,6 +31,8 @@ const organizationRoutes = require("./src/api/v1/routes/organization");
 const masterDataRoutes = require("./src/api/v1/routes/masterData");
 const dashboardRoutes = require("./src/api/v1/routes/dashboard");
 const allocatorRoutes = require("./src/api/v1/routes/allocator");
+const invoiceRoutes = require("./src/api/v1/routes/invoice");
+const payRunRoutes = require("./src/api/v1/routes/payRun");
 
 const app = express();
 //const admin = require("firebase-admin");
@@ -280,10 +282,13 @@ app.get("/test-upload", (req, res) => {
 
 // Routes
 app.use("/api/v1/users", usersRoutes);
+app.use("/api/v1/user", usersRoutes); // Alias for singular "user" path
 app.use("/api/v1", organizationRoutes);
 app.use("/api/v1", masterDataRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
 app.use("/api/v1", allocatorRoutes);
+app.use("/api/v1/invoices", invoiceRoutes);
+app.use("/api/v1/pay-runs", payRunRoutes);
 // app.use("/api/v1/cron", cronRoutes);
 
 // Import controllers and middleware for upload routes

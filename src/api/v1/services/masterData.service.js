@@ -50,6 +50,121 @@ const ensureDriverPermissions = (existingPermissions = []) => {
 class MasterDataService {
   // ==================== DRIVERS ====================
 
+  /**
+   * Get TMS drivers with payment terms information
+   * @param {Object} query - Query parameters (cohortDays, status, isActive)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of driver objects with payment terms
+   */
+  static async getTmsDrivers(query, user) {
+    const errors = [];
+
+    // Validation
+    if (query.cohortDays) {
+      const cohortValue = parseInt(query.cohortDays);
+      if (![7, 14, 21, 30].includes(cohortValue)) {
+        errors.push({
+          field: "cohortDays",
+          message: "cohortDays must be 7, 14, 21, or 30",
+        });
+      }
+    }
+
+    if (query.isActive !== undefined && query.isActive !== "true" && query.isActive !== "false") {
+      errors.push({
+        field: "isActive",
+        message: "isActive must be true or false",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Build query
+    const filter = {};
+
+    // Note: Driver model doesn't have organizationId field directly
+    // Multi-tenancy can be handled through user relationship if needed
+
+    // Filter by payment terms cohort
+    if (query.cohortDays) {
+      filter.payTermsDays = parseInt(query.cohortDays);
+    }
+
+    // Filter by active status
+    if (query.isActive !== undefined) {
+      filter.isActive = query.isActive === "true";
+    }
+
+    // Filter by status
+    if (query.status) {
+      if (query.status === "active") {
+        filter.isActive = true;
+      } else if (query.status === "inactive") {
+        filter.isActive = false;
+      } else if (query.status === "COMPLIANT") {
+        // For COMPLIANT, check both driverStatus and complianceStatus
+        filter.$or = [
+          { driverStatus: "COMPLIANT" },
+          { complianceStatus: "COMPLIANT" },
+        ];
+      } else if (["PENDING_RECRUIT", "NEW_RECRUIT", "PENDING_INDUCTION"].includes(query.status)) {
+        filter.driverStatus = query.status;
+      }
+    }
+
+    // Fetch drivers with populated party and user
+    const drivers = await Driver.find(filter)
+      .populate("party")
+      .populate("userId")
+      .sort({ driverCode: 1 })
+      .lean();
+
+    // Transform response
+    const transformedDrivers = drivers.map((driver) => ({
+      id: driver._id.toString(),
+      userId: driver.userId ? driver.userId._id.toString() : null,
+      partyId: driver.partyId ? driver.partyId.toString() : null,
+      driverCode: driver.driverCode || null,
+      driverStatus: driver.driverStatus || null,
+      complianceStatus: driver.complianceStatus || null,
+      isActive: driver.isActive || false,
+      payTermsDays: driver.payTermsDays || 7, // Default to 7 if not set
+      payAnchorDate: driver.payAnchorDate
+        ? driver.payAnchorDate.toISOString().split("T")[0]
+        : null,
+      remittanceEmail: driver.remittanceEmail || null,
+      party: driver.party
+        ? {
+            id: driver.party._id.toString(),
+            firstName: driver.party.firstName || null,
+            lastName: driver.party.lastName || null,
+            companyName: driver.party.companyName || null,
+            email: driver.party.email || null,
+            phone: driver.party.phone || null,
+          }
+        : null,
+      user: driver.userId
+        ? {
+            id: driver.userId._id.toString(),
+            email: driver.userId.email || null,
+            username: driver.userId.userName || driver.userId.username || null,
+            role: driver.userId.role || null,
+            status: driver.userId.status || null,
+            fullName: driver.userId.fullName || driver.userId.name || null,
+          }
+        : null,
+      organizationId: null, // Driver model doesn't have organizationId directly
+      createdAt: driver.createdAt.toISOString(),
+      updatedAt: driver.updatedAt.toISOString(),
+    }));
+
+    return transformedDrivers;
+  }
+
   static async getAllDrivers(query, user) {
     const filter = {};
 
@@ -4630,6 +4745,1021 @@ class MasterDataService {
       fullName: type.fullName,
       sortOrder: type.sortOrder || 0,
     }));
+  }
+
+  // ==================== PERMANENT ASSIGNMENTS ====================
+
+  /**
+   * Get all permanent assignments for a board type
+   * @param {Object} query - Query parameters (boardType)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of permanent assignment objects
+   */
+  static async getAllPermanentAssignments(query, user) {
+    const PermanentAssignment = require("../models/permanentAssignment.model");
+
+    // Validate boardType
+    if (!query.boardType) {
+      throw new AppError("boardType is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!["PUD", "LINEHAUL"].includes(query.boardType)) {
+      throw new AppError(
+        "boardType must be 'PUD' or 'LINEHAUL'",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Build filter
+    const filter = {
+      boardType: query.boardType,
+      isActive: true, // Only return active assignments
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Fetch permanent assignments, sorted by displayOrder then createdAt
+    const assignments = await PermanentAssignment.find(filter)
+      .populate("driverId", "partyId driverCode")
+      .populate({
+        path: "driverId",
+        populate: {
+          path: "party",
+          select: "firstName lastName companyName code",
+        },
+      })
+      .sort({ displayOrder: 1, createdAt: 1 })
+      .lean();
+
+    return assignments.map((assignment) => ({
+      id: assignment._id.toString(),
+      driverId: assignment.driverId ? assignment.driverId._id.toString() : null,
+      boardType: assignment.boardType,
+      routeCode: assignment.routeCode,
+      routeDescription: assignment.routeDescription,
+      defaultVehicleType: assignment.defaultVehicleType,
+      dayOfWeek: assignment.dayOfWeek,
+      defaultPickupTime: assignment.defaultPickupTime,
+      defaultDropTime: assignment.defaultDropTime,
+      startLocation: assignment.startLocation,
+      endLocation: assignment.endLocation,
+      notes: assignment.notes,
+      isActive: assignment.isActive,
+      displayOrder: assignment.displayOrder,
+      createdAt: assignment.createdAt.toISOString(),
+      updatedAt: assignment.updatedAt.toISOString(),
+    }));
+  }
+
+  /**
+   * Create a new permanent assignment
+   * @param {Object} data - Permanent assignment data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created permanent assignment
+   */
+  static async createPermanentAssignment(data, user) {
+    const PermanentAssignment = require("../models/permanentAssignment.model");
+    const Driver = require("../models/driver.model");
+    const VehicleType = require("../models/vehicleType.model");
+
+    const errors = [];
+
+    // Validation
+    if (!data.driverId) {
+      errors.push({ field: "driverId", message: "Driver ID is required" });
+    }
+
+    if (!data.boardType) {
+      errors.push({ field: "boardType", message: "Board type is required" });
+    } else if (!["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "Board type must be 'PUD' or 'LINEHAUL'",
+      });
+    }
+
+    if (data.routeCode && data.routeCode.length > 100) {
+      errors.push({
+        field: "routeCode",
+        message: "Route code must be 100 characters or less",
+      });
+    }
+
+    if (data.routeDescription && data.routeDescription.length > 500) {
+      errors.push({
+        field: "routeDescription",
+        message: "Route description must be 500 characters or less",
+      });
+    }
+
+    if (data.startLocation && data.startLocation.length > 200) {
+      errors.push({
+        field: "startLocation",
+        message: "Start location must be 200 characters or less",
+      });
+    }
+
+    if (data.endLocation && data.endLocation.length > 200) {
+      errors.push({
+        field: "endLocation",
+        message: "End location must be 200 characters or less",
+      });
+    }
+
+    if (data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    // Validate dayOfWeek (0-6 or null)
+    if (data.dayOfWeek !== undefined && data.dayOfWeek !== null) {
+      const dayOfWeek = parseInt(data.dayOfWeek);
+      if (isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+        errors.push({
+          field: "dayOfWeek",
+          message: "Day of week must be 0-6 (0=Sunday, 6=Saturday) or null",
+        });
+      }
+    }
+
+    // Validate time format (HH:mm)
+    const timeRegex = /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/;
+    if (data.defaultPickupTime && !timeRegex.test(data.defaultPickupTime)) {
+      errors.push({
+        field: "defaultPickupTime",
+        message: "Default pickup time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (data.defaultDropTime && !timeRegex.test(data.defaultDropTime)) {
+      errors.push({
+        field: "defaultDropTime",
+        message: "Default drop time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate driver exists
+    if (data.driverId) {
+      if (!mongoose.Types.ObjectId.isValid(data.driverId)) {
+        throw new AppError("Invalid driver ID", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      // Note: Driver model doesn't have organizationId field directly
+      // Multi-tenancy can be handled through user relationship if needed
+      const driver = await Driver.findOne({
+        _id: new mongoose.Types.ObjectId(data.driverId),
+      });
+
+      if (!driver) {
+        throw new AppError("Driver not found", HttpStatusCodes.NOT_FOUND);
+      }
+    }
+
+    // Validate vehicle type if provided
+    if (data.defaultVehicleType) {
+      const vehicleType = await VehicleType.findOne({
+        code: data.defaultVehicleType.toUpperCase(),
+        isActive: true,
+      });
+
+      if (!vehicleType) {
+        errors.push({
+          field: "defaultVehicleType",
+          message: "Vehicle type not found or inactive",
+        });
+        const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+        error.errors = errors;
+        throw error;
+      }
+    }
+
+    // Create permanent assignment
+    const assignment = await PermanentAssignment.create({
+      driverId: new mongoose.Types.ObjectId(data.driverId),
+      boardType: data.boardType,
+      routeCode: data.routeCode ? data.routeCode.trim() : null,
+      routeDescription: data.routeDescription ? data.routeDescription.trim() : null,
+      defaultVehicleType: data.defaultVehicleType ? data.defaultVehicleType.trim() : null,
+      dayOfWeek: data.dayOfWeek !== undefined && data.dayOfWeek !== null ? parseInt(data.dayOfWeek) : null,
+      defaultPickupTime: data.defaultPickupTime ? data.defaultPickupTime.trim() : null,
+      defaultDropTime: data.defaultDropTime ? data.defaultDropTime.trim() : null,
+      startLocation: data.startLocation ? data.startLocation.trim() : null,
+      endLocation: data.endLocation ? data.endLocation.trim() : null,
+      notes: data.notes ? data.notes.trim() : null,
+      isActive: data.isActive !== undefined ? data.isActive : true,
+      displayOrder: data.displayOrder !== undefined ? parseInt(data.displayOrder) : 0,
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: assignment._id.toString(),
+      driverId: assignment.driverId.toString(),
+      boardType: assignment.boardType,
+      routeCode: assignment.routeCode,
+      routeDescription: assignment.routeDescription,
+      defaultVehicleType: assignment.defaultVehicleType,
+      dayOfWeek: assignment.dayOfWeek,
+      defaultPickupTime: assignment.defaultPickupTime,
+      defaultDropTime: assignment.defaultDropTime,
+      startLocation: assignment.startLocation,
+      endLocation: assignment.endLocation,
+      notes: assignment.notes,
+      isActive: assignment.isActive,
+      displayOrder: assignment.displayOrder,
+      createdAt: assignment.createdAt.toISOString(),
+      updatedAt: assignment.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Update a permanent assignment
+   * @param {string} assignmentId - Permanent assignment ID
+   * @param {Object} data - Update data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Updated permanent assignment
+   */
+  static async updatePermanentAssignment(assignmentId, data, user) {
+    const PermanentAssignment = require("../models/permanentAssignment.model");
+    const Driver = require("../models/driver.model");
+    const VehicleType = require("../models/vehicleType.model");
+
+    const errors = [];
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(assignmentId)) {
+      throw new AppError("Invalid permanent assignment ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find assignment
+    const assignment = await PermanentAssignment.findOne({
+      _id: new mongoose.Types.ObjectId(assignmentId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!assignment) {
+      throw new AppError("Permanent assignment not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate boardType if provided
+    if (data.boardType && !["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "Board type must be 'PUD' or 'LINEHAUL'",
+      });
+    }
+
+    // Validate string lengths
+    if (data.routeCode !== undefined && data.routeCode && data.routeCode.length > 100) {
+      errors.push({
+        field: "routeCode",
+        message: "Route code must be 100 characters or less",
+      });
+    }
+
+    if (data.routeDescription !== undefined && data.routeDescription && data.routeDescription.length > 500) {
+      errors.push({
+        field: "routeDescription",
+        message: "Route description must be 500 characters or less",
+      });
+    }
+
+    if (data.startLocation !== undefined && data.startLocation && data.startLocation.length > 200) {
+      errors.push({
+        field: "startLocation",
+        message: "Start location must be 200 characters or less",
+      });
+    }
+
+    if (data.endLocation !== undefined && data.endLocation && data.endLocation.length > 200) {
+      errors.push({
+        field: "endLocation",
+        message: "End location must be 200 characters or less",
+      });
+    }
+
+    if (data.notes !== undefined && data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    // Validate dayOfWeek
+    if (data.dayOfWeek !== undefined && data.dayOfWeek !== null) {
+      const dayOfWeek = parseInt(data.dayOfWeek);
+      if (isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+        errors.push({
+          field: "dayOfWeek",
+          message: "Day of week must be 0-6 (0=Sunday, 6=Saturday) or null",
+        });
+      }
+    }
+
+    // Validate time format
+    const timeRegex = /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/;
+    if (data.defaultPickupTime !== undefined && data.defaultPickupTime && !timeRegex.test(data.defaultPickupTime)) {
+      errors.push({
+        field: "defaultPickupTime",
+        message: "Default pickup time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (data.defaultDropTime !== undefined && data.defaultDropTime && !timeRegex.test(data.defaultDropTime)) {
+      errors.push({
+        field: "defaultDropTime",
+        message: "Default drop time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate driver if driverId is being updated
+    if (data.driverId) {
+      if (!mongoose.Types.ObjectId.isValid(data.driverId)) {
+        throw new AppError("Invalid driver ID", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      const driver = await Driver.findOne({
+        _id: new mongoose.Types.ObjectId(data.driverId),
+        organizationId: user.activeOrganizationId || null,
+      });
+
+      if (!driver) {
+        throw new AppError("Driver not found", HttpStatusCodes.NOT_FOUND);
+      }
+    }
+
+    // Validate vehicle type if provided
+    if (data.defaultVehicleType) {
+      const vehicleType = await VehicleType.findOne({
+        code: data.defaultVehicleType.toUpperCase(),
+        isActive: true,
+      });
+
+      if (!vehicleType) {
+        errors.push({
+          field: "defaultVehicleType",
+          message: "Vehicle type not found or inactive",
+        });
+        const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+        error.errors = errors;
+        throw error;
+      }
+    }
+
+    // Update only provided fields
+    if (data.driverId !== undefined) {
+      assignment.driverId = new mongoose.Types.ObjectId(data.driverId);
+    }
+    if (data.boardType !== undefined) {
+      assignment.boardType = data.boardType;
+    }
+    if (data.routeCode !== undefined) {
+      assignment.routeCode = data.routeCode ? data.routeCode.trim() : null;
+    }
+    if (data.routeDescription !== undefined) {
+      assignment.routeDescription = data.routeDescription ? data.routeDescription.trim() : null;
+    }
+    if (data.defaultVehicleType !== undefined) {
+      assignment.defaultVehicleType = data.defaultVehicleType ? data.defaultVehicleType.trim() : null;
+    }
+    if (data.dayOfWeek !== undefined) {
+      assignment.dayOfWeek = data.dayOfWeek !== null ? parseInt(data.dayOfWeek) : null;
+    }
+    if (data.defaultPickupTime !== undefined) {
+      assignment.defaultPickupTime = data.defaultPickupTime ? data.defaultPickupTime.trim() : null;
+    }
+    if (data.defaultDropTime !== undefined) {
+      assignment.defaultDropTime = data.defaultDropTime ? data.defaultDropTime.trim() : null;
+    }
+    if (data.startLocation !== undefined) {
+      assignment.startLocation = data.startLocation ? data.startLocation.trim() : null;
+    }
+    if (data.endLocation !== undefined) {
+      assignment.endLocation = data.endLocation ? data.endLocation.trim() : null;
+    }
+    if (data.notes !== undefined) {
+      assignment.notes = data.notes ? data.notes.trim() : null;
+    }
+    if (data.isActive !== undefined) {
+      assignment.isActive = data.isActive;
+    }
+    if (data.displayOrder !== undefined) {
+      assignment.displayOrder = parseInt(data.displayOrder);
+    }
+
+    await assignment.save();
+
+    return {
+      id: assignment._id.toString(),
+      driverId: assignment.driverId.toString(),
+      boardType: assignment.boardType,
+      routeCode: assignment.routeCode,
+      routeDescription: assignment.routeDescription,
+      defaultVehicleType: assignment.defaultVehicleType,
+      dayOfWeek: assignment.dayOfWeek,
+      defaultPickupTime: assignment.defaultPickupTime,
+      defaultDropTime: assignment.defaultDropTime,
+      startLocation: assignment.startLocation,
+      endLocation: assignment.endLocation,
+      notes: assignment.notes,
+      isActive: assignment.isActive,
+      displayOrder: assignment.displayOrder,
+      createdAt: assignment.createdAt.toISOString(),
+      updatedAt: assignment.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Delete a permanent assignment (soft delete)
+   * @param {string} assignmentId - Permanent assignment ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Success message
+   */
+  static async deletePermanentAssignment(assignmentId, user) {
+    const PermanentAssignment = require("../models/permanentAssignment.model");
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(assignmentId)) {
+      throw new AppError("Invalid permanent assignment ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find assignment
+    const assignment = await PermanentAssignment.findOne({
+      _id: new mongoose.Types.ObjectId(assignmentId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!assignment) {
+      throw new AppError("Permanent assignment not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Soft delete (set isActive to false)
+    assignment.isActive = false;
+    await assignment.save();
+
+    return {
+      success: true,
+      message: "Permanent assignment deleted successfully",
+    };
+  }
+
+  // ==================== PERMANENT JOBS ====================
+
+  /**
+   * Get all permanent jobs for a board type
+   * @param {Object} query - Query parameters (boardType)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of permanent job objects
+   */
+  static async getAllPermanentJobs(query, user) {
+    const PermanentJob = require("../models/permanentJob.model");
+
+    // Validate boardType
+    if (!query.boardType) {
+      throw new AppError("boardType is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!["PUD", "LINEHAUL"].includes(query.boardType)) {
+      throw new AppError(
+        "boardType must be 'PUD' or 'LINEHAUL'",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Build filter
+    const filter = {
+      boardType: query.boardType,
+      isActive: true, // Only return active jobs
+    };
+
+    // Multi-tenant support
+    if (user.activeOrganizationId) {
+      filter.organizationId = user.activeOrganizationId;
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Fetch permanent jobs, sorted by displayOrder then createdAt
+    const jobs = await PermanentJob.find(filter)
+      .populate("customerId", "partyId customerCode")
+      .populate({
+        path: "customerId",
+        populate: {
+          path: "party",
+          select: "companyName firstName lastName code",
+        },
+      })
+      .sort({ displayOrder: 1, createdAt: 1 })
+      .lean();
+
+    return jobs.map((job) => ({
+      id: job._id.toString(),
+      customerId: job.customerId ? job.customerId._id.toString() : null,
+      boardType: job.boardType,
+      serviceCode: job.serviceCode,
+      pickupSuburb: job.pickupSuburb,
+      deliverySuburb: job.deliverySuburb,
+      defaultVehicleType: job.defaultVehicleType,
+      routeDescription: job.routeDescription,
+      dayOfWeek: job.dayOfWeek,
+      defaultPickupTime: job.defaultPickupTime,
+      defaultDropTime: job.defaultDropTime,
+      notes: job.notes,
+      isActive: job.isActive,
+      displayOrder: job.displayOrder,
+      createdAt: job.createdAt.toISOString(),
+      updatedAt: job.updatedAt.toISOString(),
+    }));
+  }
+
+  /**
+   * Create a new permanent job
+   * @param {Object} data - Permanent job data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created permanent job
+   */
+  static async createPermanentJob(data, user) {
+    const PermanentJob = require("../models/permanentJob.model");
+    const Customer = require("../models/customer.model");
+    const ServiceCode = require("../models/serviceCode.model");
+    const VehicleType = require("../models/vehicleType.model");
+
+    const errors = [];
+
+    // Validation
+    if (!data.customerId) {
+      errors.push({ field: "customerId", message: "Customer ID is required" });
+    }
+
+    if (!data.boardType) {
+      errors.push({ field: "boardType", message: "Board type is required" });
+    } else if (!["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "Board type must be 'PUD' or 'LINEHAUL'",
+      });
+    }
+
+    if (data.pickupSuburb && data.pickupSuburb.length > 200) {
+      errors.push({
+        field: "pickupSuburb",
+        message: "Pickup suburb must be 200 characters or less",
+      });
+    }
+
+    if (data.deliverySuburb && data.deliverySuburb.length > 200) {
+      errors.push({
+        field: "deliverySuburb",
+        message: "Delivery suburb must be 200 characters or less",
+      });
+    }
+
+    if (data.routeDescription && data.routeDescription.length > 500) {
+      errors.push({
+        field: "routeDescription",
+        message: "Route description must be 500 characters or less",
+      });
+    }
+
+    if (data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    // Validate dayOfWeek (0-6 or null)
+    if (data.dayOfWeek !== undefined && data.dayOfWeek !== null) {
+      const dayOfWeek = parseInt(data.dayOfWeek);
+      if (isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+        errors.push({
+          field: "dayOfWeek",
+          message: "Day of week must be 0-6 (0=Sunday, 6=Saturday) or null",
+        });
+      }
+    }
+
+    // Validate time format (HH:mm)
+    const timeRegex = /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/;
+    if (data.defaultPickupTime && !timeRegex.test(data.defaultPickupTime)) {
+      errors.push({
+        field: "defaultPickupTime",
+        message: "Default pickup time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (data.defaultDropTime && !timeRegex.test(data.defaultDropTime)) {
+      errors.push({
+        field: "defaultDropTime",
+        message: "Default drop time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate customer exists
+    if (data.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(data.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      const customer = await Customer.findOne({
+        _id: new mongoose.Types.ObjectId(data.customerId),
+        organizationId: user.activeOrganizationId || null,
+      });
+
+      if (!customer) {
+        throw new AppError("Customer not found", HttpStatusCodes.NOT_FOUND);
+      }
+    }
+
+    // Validate service code if provided (not null/empty/undefined)
+    // If serviceCode is provided, verify it exists and is active
+    // If serviceCode is null/empty/undefined, skip validation (it's optional)
+    if (data.serviceCode !== undefined && data.serviceCode !== null && data.serviceCode !== "") {
+      // Ensure serviceCode is a string before trimming
+      if (typeof data.serviceCode === "string") {
+        const trimmedServiceCode = data.serviceCode.trim();
+        if (trimmedServiceCode) {
+          // Build filter for service code lookup
+          const serviceCodeFilter = {
+            code: trimmedServiceCode, // Case-sensitive match
+            isActive: true,
+          };
+
+          // Filter by organizationId if user has one (service codes are organization-specific)
+          if (user.activeOrganizationId) {
+            serviceCodeFilter.organizationId = user.activeOrganizationId;
+          } else {
+            serviceCodeFilter.organizationId = null;
+          }
+
+          const serviceCode = await ServiceCode.findOne(serviceCodeFilter);
+
+          if (!serviceCode) {
+            errors.push({
+              field: "serviceCode",
+              message: "Service code not found or inactive",
+            });
+          }
+        }
+      } else {
+        errors.push({
+          field: "serviceCode",
+          message: "Service code must be a string",
+        });
+      }
+    }
+
+    // Validate vehicle type if provided
+    if (data.defaultVehicleType) {
+      const vehicleType = await VehicleType.findOne({
+        code: data.defaultVehicleType.toUpperCase(),
+        isActive: true,
+      });
+
+      if (!vehicleType) {
+        errors.push({
+          field: "defaultVehicleType",
+          message: "Vehicle type not found or inactive",
+        });
+      }
+    }
+
+    // Check all errors and throw if any exist (after all async validations)
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Create permanent job
+    const job = await PermanentJob.create({
+      customerId: new mongoose.Types.ObjectId(data.customerId),
+      boardType: data.boardType,
+      serviceCode: data.serviceCode ? data.serviceCode.trim() : null,
+      pickupSuburb: data.pickupSuburb ? data.pickupSuburb.trim() : null,
+      deliverySuburb: data.deliverySuburb ? data.deliverySuburb.trim() : null,
+      defaultVehicleType: data.defaultVehicleType ? data.defaultVehicleType.trim() : null,
+      routeDescription: data.routeDescription ? data.routeDescription.trim() : null,
+      dayOfWeek: data.dayOfWeek !== undefined && data.dayOfWeek !== null ? parseInt(data.dayOfWeek) : null,
+      defaultPickupTime: data.defaultPickupTime ? data.defaultPickupTime.trim() : null,
+      defaultDropTime: data.defaultDropTime ? data.defaultDropTime.trim() : null,
+      notes: data.notes ? data.notes.trim() : null,
+      isActive: data.isActive !== undefined ? data.isActive : true,
+      displayOrder: data.displayOrder !== undefined ? parseInt(data.displayOrder) : 0,
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    return {
+      id: job._id.toString(),
+      customerId: job.customerId.toString(),
+      boardType: job.boardType,
+      serviceCode: job.serviceCode,
+      pickupSuburb: job.pickupSuburb,
+      deliverySuburb: job.deliverySuburb,
+      defaultVehicleType: job.defaultVehicleType,
+      routeDescription: job.routeDescription,
+      dayOfWeek: job.dayOfWeek,
+      defaultPickupTime: job.defaultPickupTime,
+      defaultDropTime: job.defaultDropTime,
+      notes: job.notes,
+      isActive: job.isActive,
+      displayOrder: job.displayOrder,
+      createdAt: job.createdAt.toISOString(),
+      updatedAt: job.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Update a permanent job
+   * @param {string} jobId - Permanent job ID
+   * @param {Object} data - Update data
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Updated permanent job
+   */
+  static async updatePermanentJob(jobId, data, user) {
+    const PermanentJob = require("../models/permanentJob.model");
+    const Customer = require("../models/customer.model");
+    const ServiceCode = require("../models/serviceCode.model");
+    const VehicleType = require("../models/vehicleType.model");
+
+    const errors = [];
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      throw new AppError("Invalid permanent job ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find job
+    const job = await PermanentJob.findOne({
+      _id: new mongoose.Types.ObjectId(jobId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!job) {
+      throw new AppError("Permanent job not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Validate boardType if provided
+    if (data.boardType && !["PUD", "LINEHAUL"].includes(data.boardType)) {
+      errors.push({
+        field: "boardType",
+        message: "Board type must be 'PUD' or 'LINEHAUL'",
+      });
+    }
+
+    // Validate string lengths
+    if (data.pickupSuburb !== undefined && data.pickupSuburb && data.pickupSuburb.length > 200) {
+      errors.push({
+        field: "pickupSuburb",
+        message: "Pickup suburb must be 200 characters or less",
+      });
+    }
+
+    if (data.deliverySuburb !== undefined && data.deliverySuburb && data.deliverySuburb.length > 200) {
+      errors.push({
+        field: "deliverySuburb",
+        message: "Delivery suburb must be 200 characters or less",
+      });
+    }
+
+    if (data.routeDescription !== undefined && data.routeDescription && data.routeDescription.length > 500) {
+      errors.push({
+        field: "routeDescription",
+        message: "Route description must be 500 characters or less",
+      });
+    }
+
+    if (data.notes !== undefined && data.notes && data.notes.length > 1000) {
+      errors.push({
+        field: "notes",
+        message: "Notes must be 1000 characters or less",
+      });
+    }
+
+    // Validate dayOfWeek
+    if (data.dayOfWeek !== undefined && data.dayOfWeek !== null) {
+      const dayOfWeek = parseInt(data.dayOfWeek);
+      if (isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+        errors.push({
+          field: "dayOfWeek",
+          message: "Day of week must be 0-6 (0=Sunday, 6=Saturday) or null",
+        });
+      }
+    }
+
+    // Validate time format
+    const timeRegex = /^([0-1][0-9]|2[0-3]):[0-5][0-9]$/;
+    if (data.defaultPickupTime !== undefined && data.defaultPickupTime && !timeRegex.test(data.defaultPickupTime)) {
+      errors.push({
+        field: "defaultPickupTime",
+        message: "Default pickup time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (data.defaultDropTime !== undefined && data.defaultDropTime && !timeRegex.test(data.defaultDropTime)) {
+      errors.push({
+        field: "defaultDropTime",
+        message: "Default drop time must be in HH:mm format (24-hour)",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Validate customer if customerId is being updated
+    if (data.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(data.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      const customer = await Customer.findOne({
+        _id: new mongoose.Types.ObjectId(data.customerId),
+        organizationId: user.activeOrganizationId || null,
+      });
+
+      if (!customer) {
+        throw new AppError("Customer not found", HttpStatusCodes.NOT_FOUND);
+      }
+    }
+
+    // Validate service code if provided (not null/empty/undefined)
+    // If serviceCode is provided, verify it exists and is active
+    // If serviceCode is null/empty/undefined, skip validation (it's optional)
+    if (data.serviceCode !== undefined && data.serviceCode !== null && data.serviceCode !== "") {
+      // Ensure serviceCode is a string before trimming
+      if (typeof data.serviceCode === "string") {
+        const trimmedServiceCode = data.serviceCode.trim();
+        if (trimmedServiceCode) {
+          // Build filter for service code lookup
+          const serviceCodeFilter = {
+            code: trimmedServiceCode, // Case-sensitive match
+            isActive: true,
+          };
+
+          // Filter by organizationId if user has one (service codes are organization-specific)
+          if (user.activeOrganizationId) {
+            serviceCodeFilter.organizationId = user.activeOrganizationId;
+          } else {
+            serviceCodeFilter.organizationId = null;
+          }
+
+          const serviceCode = await ServiceCode.findOne(serviceCodeFilter);
+
+          if (!serviceCode) {
+            errors.push({
+              field: "serviceCode",
+              message: "Service code not found or inactive",
+            });
+          }
+        }
+      } else {
+        errors.push({
+          field: "serviceCode",
+          message: "Service code must be a string",
+        });
+      }
+    }
+
+    // Validate vehicle type if provided
+    if (data.defaultVehicleType) {
+      const vehicleType = await VehicleType.findOne({
+        code: data.defaultVehicleType.toUpperCase(),
+        isActive: true,
+      });
+
+      if (!vehicleType) {
+        errors.push({
+          field: "defaultVehicleType",
+          message: "Vehicle type not found or inactive",
+        });
+        const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+        error.errors = errors;
+        throw error;
+      }
+    }
+
+    // Update only provided fields
+    if (data.customerId !== undefined) {
+      job.customerId = new mongoose.Types.ObjectId(data.customerId);
+    }
+    if (data.boardType !== undefined) {
+      job.boardType = data.boardType;
+    }
+    if (data.serviceCode !== undefined) {
+      job.serviceCode = data.serviceCode ? data.serviceCode.trim() : null;
+    }
+    if (data.pickupSuburb !== undefined) {
+      job.pickupSuburb = data.pickupSuburb ? data.pickupSuburb.trim() : null;
+    }
+    if (data.deliverySuburb !== undefined) {
+      job.deliverySuburb = data.deliverySuburb ? data.deliverySuburb.trim() : null;
+    }
+    if (data.defaultVehicleType !== undefined) {
+      job.defaultVehicleType = data.defaultVehicleType ? data.defaultVehicleType.trim() : null;
+    }
+    if (data.routeDescription !== undefined) {
+      job.routeDescription = data.routeDescription ? data.routeDescription.trim() : null;
+    }
+    if (data.dayOfWeek !== undefined) {
+      job.dayOfWeek = data.dayOfWeek !== null ? parseInt(data.dayOfWeek) : null;
+    }
+    if (data.defaultPickupTime !== undefined) {
+      job.defaultPickupTime = data.defaultPickupTime ? data.defaultPickupTime.trim() : null;
+    }
+    if (data.defaultDropTime !== undefined) {
+      job.defaultDropTime = data.defaultDropTime ? data.defaultDropTime.trim() : null;
+    }
+    if (data.notes !== undefined) {
+      job.notes = data.notes ? data.notes.trim() : null;
+    }
+    if (data.isActive !== undefined) {
+      job.isActive = data.isActive;
+    }
+    if (data.displayOrder !== undefined) {
+      job.displayOrder = parseInt(data.displayOrder);
+    }
+
+    await job.save();
+
+    return {
+      id: job._id.toString(),
+      customerId: job.customerId.toString(),
+      boardType: job.boardType,
+      serviceCode: job.serviceCode,
+      pickupSuburb: job.pickupSuburb,
+      deliverySuburb: job.deliverySuburb,
+      defaultVehicleType: job.defaultVehicleType,
+      routeDescription: job.routeDescription,
+      dayOfWeek: job.dayOfWeek,
+      defaultPickupTime: job.defaultPickupTime,
+      defaultDropTime: job.defaultDropTime,
+      notes: job.notes,
+      isActive: job.isActive,
+      displayOrder: job.displayOrder,
+      createdAt: job.createdAt.toISOString(),
+      updatedAt: job.updatedAt.toISOString(),
+    };
+  }
+
+  /**
+   * Delete a permanent job (soft delete)
+   * @param {string} jobId - Permanent job ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Success message
+   */
+  static async deletePermanentJob(jobId, user) {
+    const PermanentJob = require("../models/permanentJob.model");
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      throw new AppError("Invalid permanent job ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find job
+    const job = await PermanentJob.findOne({
+      _id: new mongoose.Types.ObjectId(jobId),
+      organizationId: user.activeOrganizationId || null,
+    });
+
+    if (!job) {
+      throw new AppError("Permanent job not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Soft delete (set isActive to false)
+    job.isActive = false;
+    await job.save();
+
+    return {
+      success: true,
+      message: "Permanent job deleted successfully",
+    };
   }
 
   // ==================== VEHICLES ====================
