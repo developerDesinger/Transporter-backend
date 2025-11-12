@@ -69,6 +69,29 @@ class PayRunController {
     const result = await PayRunService.buildPayRun(req.body, req.user);
     return res.status(201).json(result);
   });
+
+  /**
+   * GET /api/v1/pay-runs/:id/remittances
+   * Get remittance data for a posted pay run (JSON or PDF format)
+   */
+  static getPayRunRemittances = catchAsyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const format = req.query.format || "json";
+    const result = await PayRunService.getPayRunRemittances(id, req.user, format);
+
+    // Handle PDF response
+    if (result.format === "pdf") {
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${result.filename}"`
+      );
+      return res.status(200).send(result.buffer);
+    }
+
+    // Handle JSON response
+    return res.status(200).json(result);
+  });
 }
 
 module.exports = PayRunController;

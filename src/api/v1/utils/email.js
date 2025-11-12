@@ -1,8 +1,12 @@
 const sgMail = require("@sendgrid/mail");
 require("dotenv").config(); // Load environment variables
 
-// Set SendGrid API Key
+// Validate and set SendGrid API Key
+if (!process.env.SENDGRID_API_KEY) {
+  console.warn("⚠️  WARNING: SENDGRID_API_KEY is not set in environment variables. Email sending will fail.");
+} else {
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
 
 const sendEmail = async (options) => {
   // Validate recipient email
@@ -510,15 +514,56 @@ const sendRCTIEmail = async (options) => {
   }
 
   try {
+    // Check if SendGrid API key is configured
+    if (!process.env.SENDGRID_API_KEY) {
+      const error = new Error("SendGrid API key is not configured. Please set SENDGRID_API_KEY in your environment variables.");
+      error.code = "SENDGRID_NOT_CONFIGURED";
+      throw error;
+    }
+
     await sgMail.send(mailOptions);
     console.log(`✅ RCTI email sent successfully to: ${recipientEmail}`);
     return { success: true };
   } catch (error) {
-    console.error(
-      "❌ Error sending RCTI email:",
-      error.response ? error.response.body : error
-    );
-    throw error;
+    // Provide more detailed error information
+    let errorMessage = "Failed to send RCTI email";
+    let errorCode = "EMAIL_SEND_ERROR";
+
+    if (error.code === "SENDGRID_NOT_CONFIGURED") {
+      errorMessage = error.message;
+      errorCode = error.code;
+    } else if (error.response) {
+      // SendGrid API error
+      const statusCode = error.response.statusCode || error.response.status;
+      const body = error.response.body || {};
+
+      if (statusCode === 401 || statusCode === 403) {
+        errorMessage = "Unauthorized: SendGrid API key is invalid or missing. Please check your SENDGRID_API_KEY environment variable.";
+        errorCode = "SENDGRID_UNAUTHORIZED";
+      } else if (statusCode === 400) {
+        errorMessage = `Bad Request: ${body.errors ? body.errors.map(e => e.message).join(", ") : "Invalid email request"}`;
+        errorCode = "SENDGRID_BAD_REQUEST";
+      } else {
+        errorMessage = `SendGrid API Error (${statusCode}): ${body.errors ? body.errors.map(e => e.message).join(", ") : error.message}`;
+        errorCode = "SENDGRID_API_ERROR";
+      }
+
+      console.error("❌ SendGrid API Error Details:", {
+        statusCode,
+        body,
+        message: error.message,
+      });
+    } else {
+      errorMessage = error.message || "Unknown error occurred while sending email";
+    }
+
+    console.error(`❌ Error sending RCTI email to ${recipientEmail}:`, errorMessage);
+
+    // Create a more descriptive error
+    const emailError = new Error(errorMessage);
+    emailError.code = errorCode;
+    emailError.originalError = error;
+    throw emailError;
   }
 };
 

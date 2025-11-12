@@ -28,6 +28,14 @@ router.get(
   PayRunController.getPayRunItems
 );
 
+// GET /api/v1/pay-runs/:id/remittances - Get remittance data for a posted pay run
+// Must come before /:id route to avoid conflicts
+router.get(
+  "/:id/remittances",
+  requirePermission("payruns.view"),
+  PayRunController.getPayRunRemittances
+);
+
 // POST /api/v1/pay-runs/:id/rebuild - Rebuild a pay run (re-query eligibility, preserve exclusions)
 // Must come before /:id route to avoid conflicts
 router.post(

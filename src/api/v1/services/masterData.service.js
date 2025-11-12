@@ -8832,36 +8832,39 @@ class MasterDataService {
     const RCTILog = require("../models/rctiLog.model");
     const { sendRCTIEmail } = require("../utils/email");
     const AppError = require("../utils/AppError");
-    const HttpStatusCodes = require("../utils/httpStatusCodes");
+    const HttpStatusCodes = require("../enums/httpStatusCode");
 
     const { driverIds } = data || {};
 
-    // Verify pay run exists
-    const payRun = await PayRun.findById(payRunId);
+    // Verify pay run exists and belongs to organization
+    const organizationId = user.activeOrganizationId || null;
+    const filter = {
+      _id: new mongoose.Types.ObjectId(payRunId),
+    };
+
+    if (organizationId) {
+      filter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      filter.organizationId = null;
+    }
+
+    const payRun = await PayRun.findOne(filter).lean();
     if (!payRun) {
       throw new AppError("Pay run not found", HttpStatusCodes.NOT_FOUND);
     }
 
-    // Check organization access (multi-tenant)
-    if (
-      !user.isSuperAdmin &&
-      user.activeOrganizationId &&
-      payRun.organizationId &&
-      payRun.organizationId.toString() !== user.activeOrganizationId.toString()
-    ) {
+    // Verify pay run is posted
+    if (payRun.status !== "POSTED") {
       throw new AppError(
-        "Access denied to this pay run",
-        HttpStatusCodes.FORBIDDEN
+        "RCTIs can only be sent for posted pay runs",
+        HttpStatusCodes.BAD_REQUEST
       );
     }
 
-    // Get pay run drivers
-    const payRunDriverQuery = { payrunId: payRunId };
-    if (driverIds && Array.isArray(driverIds) && driverIds.length > 0) {
-      payRunDriverQuery.driverId = { $in: driverIds };
-    }
-
-    const payRunDrivers = await PayRunDriver.find(payRunDriverQuery)
+    // Get all pay run drivers first (to validate driverIds if provided)
+    const allPayRunDrivers = await PayRunDriver.find({
+      payrunId: new mongoose.Types.ObjectId(payRunId),
+    })
       .populate({
         path: "driverId",
         populate: {
@@ -8871,37 +8874,115 @@ class MasterDataService {
       })
       .lean();
 
-    if (payRunDrivers.length === 0) {
+    if (allPayRunDrivers.length === 0) {
       throw new AppError(
         "No drivers found in this pay run",
         HttpStatusCodes.BAD_REQUEST
       );
     }
 
-    let sentCount = 0;
-    let errorCount = 0;
-    let totalProcessed = 0; // Count of eligible drivers processed
-    const logs = [];
+    // Filter drivers if specific IDs provided
+    let targetPayRunDrivers = allPayRunDrivers;
+    if (driverIds && Array.isArray(driverIds) && driverIds.length > 0) {
+      // Convert driverIds to ObjectIds
+      const objectIdDriverIds = driverIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
 
-    // Process each driver
-    for (const payRunDriver of payRunDrivers) {
-      const driver = payRunDriver.driverId;
-      if (!driver) continue;
-
-      // Check RCTI eligibility
-      if (!driver.rctiAgreementAccepted || !driver.gstRegistered) {
-        continue; // Skip drivers who haven't accepted RCTI agreement or aren't GST registered
+      if (objectIdDriverIds.length === 0) {
+        throw new AppError(
+          "All driver IDs must be valid ObjectIds",
+          HttpStatusCodes.BAD_REQUEST
+        );
       }
 
-      // Increment total processed count (only eligible drivers)
-      totalProcessed++;
+      // Validate all specified drivers belong to pay run
+      const payRunDriverIds = allPayRunDrivers.map((d) =>
+        d.driverId ? d.driverId._id.toString() : d.driverId.toString()
+      );
+      const invalidIds = objectIdDriverIds.filter(
+        (id) => !payRunDriverIds.includes(id.toString())
+      );
+
+      if (invalidIds.length > 0) {
+        const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+        error.errors = [
+          {
+            field: "driverIds",
+            message: `The following driver IDs are not in this pay run: ${invalidIds.map((id) => id.toString()).join(", ")}`,
+          },
+        ];
+        throw error;
+      }
+
+      // Filter to specified drivers
+      targetPayRunDrivers = allPayRunDrivers.filter((d) => {
+        const driverIdStr = d.driverId
+          ? d.driverId._id.toString()
+          : d.driverId.toString();
+        return objectIdDriverIds.some((id) => id.toString() === driverIdStr);
+      });
+    }
+
+    console.log(
+      `Found ${allPayRunDrivers.length} total drivers, ${targetPayRunDrivers.length} target drivers`
+    );
+
+    let sentCount = 0;
+    let errorCount = 0;
+    const sentDrivers = [];
+    const failedDrivers = [];
+
+    // Filter to RCTI-eligible drivers
+    const eligiblePayRunDrivers = targetPayRunDrivers.filter((payRunDriver) => {
+      const driver = payRunDriver.driverId;
+      if (!driver) {
+        return false;
+      }
+
+      const party = driver.partyId;
+
+      // Check RCTI eligibility criteria
+      // 1. Must have valid email address
+      if (!party || !party.email || !party.email.trim()) {
+        return false;
+      }
+
+      // 2. Must have payments in pay run (totalAmount > 0)
+      const totalAmount = parseFloat(
+        payRunDriver.totalAmount || payRunDriver.netPay || 0
+      );
+      if (totalAmount <= 0) {
+        return false;
+      }
+
+      // 3. Must be active
+      if (driver.isActive !== true) {
+        return false;
+      }
+
+      // 4. Must not be excluded (if excludeFromRCTI field exists)
+      if (driver.excludeFromRCTI === true) {
+        return false;
+      }
+
+      return true;
+    });
+
+    console.log(
+      `Eligible drivers: ${eligiblePayRunDrivers.length} out of ${targetPayRunDrivers.length}`
+    );
+
+    // Process each eligible driver
+    for (const payRunDriver of eligiblePayRunDrivers) {
+      const driver = payRunDriver.driverId;
+      const party = driver.partyId;
 
       let rctiLog = null;
 
       try {
-        // Get driver party for email and name
-        const party = await Party.findById(driver.partyId);
-        if (!party || !party.email) {
+        // Validate email exists (should already be checked, but double-check)
+        if (!party || !party.email || !party.email.trim()) {
           throw new Error("Driver email not found");
         }
 
@@ -8912,20 +8993,29 @@ class MasterDataService {
 
         // Get driver name
         const driverName =
-          party.firstName && party.lastName
+          party.companyName ||
+          (party.firstName && party.lastName
             ? `${party.firstName} ${party.lastName}`.trim()
-            : party.companyName || party.contactName || "Driver";
+            : party.contactName || "Driver");
 
-        // Get organization ID for multi-tenancy
-        const organizationId =
+        // Get driver code
+        const driverCode = driver.driverCode || "N/A";
+
+        // Get organization ID for multi-tenancy (use payRun's organizationId or user's)
+        const rctiOrganizationId =
           payRun.organizationId || user.activeOrganizationId || null;
+
+        // Get total amount (use netPay or totalAmount)
+        const totalAmount = parseFloat(
+          payRunDriver.totalAmount || payRunDriver.netPay || 0
+        );
 
         // Create RCTI log record
         rctiLog = await RCTILog.create({
           driverId: driver._id,
           driverName: driverName,
           rctiNumber: rctiNumber,
-          payrunId: payRunId,
+          payrunId: new mongoose.Types.ObjectId(payRunId),
           payRunNumber: payRun.payRunNumber,
           sentTo: party.email,
           sentAt: null, // Will be set after successful send
@@ -8933,11 +9023,11 @@ class MasterDataService {
           autoSent: false,
           periodStart: payRun.periodStart,
           periodEnd: payRun.periodEnd,
-          totalAmount: payRunDriver.totalAmount
-            ? payRunDriver.totalAmount.toString()
-            : "0.00",
+          totalAmount: totalAmount.toString(),
           errorMessage: null,
-          organizationId: organizationId,
+          organizationId: rctiOrganizationId
+            ? new mongoose.Types.ObjectId(rctiOrganizationId)
+            : null,
         });
 
         // Generate RCTI PDF (placeholder - implement PDF generation)
@@ -8951,9 +9041,7 @@ class MasterDataService {
           payRunNumber: payRun.payRunNumber,
           periodStart: payRun.periodStart,
           periodEnd: payRun.periodEnd,
-          totalAmount: payRunDriver.totalAmount
-            ? payRunDriver.totalAmount.toString()
-            : "0.00",
+          totalAmount: totalAmount.toString(),
           // attachment: rctiPdf, // Uncomment when PDF generation is implemented
           // attachmentName: `RCTI-${rctiNumber}.pdf`,
         });
@@ -8965,11 +9053,11 @@ class MasterDataService {
         });
 
         sentCount++;
-        logs.push({
-          id: rctiLog._id.toString(),
+        sentDrivers.push({
           driverId: driver._id.toString(),
-          status: "success",
-          rctiNumber: rctiNumber,
+          driverCode: driverCode,
+          driverName: driverName,
+          email: party.email,
         });
       } catch (error) {
         console.error(
@@ -8977,33 +9065,67 @@ class MasterDataService {
           error
         );
 
+        // Get driver code and name for error response
+        const driverCode = driver.driverCode || "N/A";
+        const driverName =
+          party && party.companyName
+            ? party.companyName
+            : party && party.firstName && party.lastName
+            ? `${party.firstName} ${party.lastName}`.trim()
+            : party && party.contactName
+            ? party.contactName
+            : "Driver";
+
+        // Extract detailed error message
+        let errorMessage = "Failed to send RCTI email";
+        if (error.message) {
+          errorMessage = error.message;
+        } else if (error.code === "SENDGRID_UNAUTHORIZED") {
+          errorMessage = "Unauthorized: SendGrid API key is invalid or missing";
+        } else if (error.code === "SENDGRID_NOT_CONFIGURED") {
+          errorMessage = "SendGrid API key is not configured";
+        } else if (error.response && error.response.body) {
+          const body = error.response.body;
+          if (body.errors && body.errors.length > 0) {
+            errorMessage = body.errors.map((e) => e.message).join(", ");
+          }
+        }
+
         // Update log as failed
         if (rctiLog) {
           await RCTILog.findByIdAndUpdate(rctiLog._id, {
             status: "failed",
             sentAt: new Date(),
-            errorMessage: error.message || "Failed to send RCTI email",
-          });
-
-          logs.push({
-            id: rctiLog._id.toString(),
-            driverId: driver._id.toString(),
-            status: "failed",
-            errorMessage: error.message || "Failed to send RCTI email",
+            errorMessage: errorMessage,
           });
         }
 
         errorCount++;
+        failedDrivers.push({
+          driverId: driver._id.toString(),
+          driverCode: driverCode,
+          driverName: driverName,
+          error: errorMessage,
+        });
       }
     }
 
+    console.log(
+      `RCTI Summary: Total drivers: ${allPayRunDrivers.length}, Eligible: ${eligiblePayRunDrivers.length}, Sent: ${sentCount}, Errors: ${errorCount}`
+    );
+
     return {
       success: true,
-      message: "RCTIs sent successfully",
-      sentCount: sentCount,
-      totaldrivers: totalProcessed, // Total eligible drivers processed
-      errorCount: errorCount,
-      logs: logs,
+      data: {
+        payRunId: payRun._id.toString(),
+        totalDrivers: allPayRunDrivers.length,
+        eligibleDrivers: eligiblePayRunDrivers.length,
+        sentCount: sentCount,
+        errorCount: errorCount,
+        failedDrivers: failedDrivers,
+        sentDrivers: sentDrivers,
+        message: "RCTIs sent successfully",
+      },
     };
   }
 

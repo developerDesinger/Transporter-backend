@@ -1377,6 +1377,439 @@ class PayRunService {
       throw error;
     }
   }
+
+  /**
+   * Get remittance data for a posted pay run
+   * @param {string} payRunId - Pay run ID
+   * @param {Object} user - Authenticated user
+   * @param {string} format - Response format: 'json' or 'pdf' (default: 'json')
+   * @returns {Object|Buffer} Remittance data (JSON object) or PDF buffer
+   */
+  static async getPayRunRemittances(payRunId, user, format = "json") {
+    const PayRunDriver = require("../models/payRunDriver.model");
+    const PayRunItem = require("../models/payRunItem.model");
+    const Driver = require("../models/driver.model");
+    const Party = require("../models/party.model");
+    const Job = require("../models/job.model");
+    const DriverAdjustment = require("../models/driverAdjustment.model");
+
+    // Validate format parameter
+    if (format !== "json" && format !== "pdf") {
+      throw new AppError(
+        'Format must be either "json" or "pdf"',
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Validate ID
+    if (!payRunId) {
+      throw new AppError("Pay run ID is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(payRunId)) {
+      throw new AppError("Invalid pay run ID format", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Verify pay run exists and belongs to organization
+    const filter = {
+      _id: new mongoose.Types.ObjectId(payRunId),
+    };
+
+    if (organizationId) {
+      filter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      filter.organizationId = null;
+    }
+
+    const payRun = await PayRun.findOne(filter).lean();
+
+    if (!payRun) {
+      throw new AppError("Pay run not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify pay run is posted
+    if (payRun.status !== "POSTED") {
+      throw new AppError(
+        "Remittances can only be generated for posted pay runs",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Fetch pay run drivers with populated driver and party
+    const payRunDrivers = await PayRunDriver.find({
+      payrunId: new mongoose.Types.ObjectId(payRunId),
+    })
+      .populate({
+        path: "driverId",
+        model: Driver,
+        populate: {
+          path: "partyId",
+          model: Party,
+          select: "companyName firstName lastName",
+        },
+      })
+      .lean();
+
+    // Fetch all items for this pay run
+    const payRunItems = await PayRunItem.find({
+      payrunId: new mongoose.Types.ObjectId(payRunId),
+      excluded: false, // Only include non-excluded items
+    })
+      .populate({
+        path: "jobId",
+        model: Job,
+        select: "jobNumber completedAt date",
+      })
+      .populate({
+        path: "driverAdjustmentId",
+        model: DriverAdjustment,
+        select: "effectiveDate description",
+      })
+      .lean();
+
+    // Group items by driver
+    const itemsByDriver = payRunItems.reduce((acc, item) => {
+      const driverId = item.driverId.toString();
+      if (!acc[driverId]) {
+        acc[driverId] = [];
+      }
+      acc[driverId].push(item);
+      return acc;
+    }, {});
+
+    // Build remittances
+    const remittances = payRunDrivers.map((payRunDriver) => {
+      const driver = payRunDriver.driverId;
+      const party = driver?.partyId;
+
+      // Resolve driver name
+      let driverName = "Unknown driver";
+      if (party) {
+        if (party.companyName) {
+          driverName = party.companyName;
+        } else if (party.firstName || party.lastName) {
+          driverName = `${party.firstName || ""} ${party.lastName || ""}`.trim();
+        }
+      }
+
+      // Get driver items
+      const driverItems = itemsByDriver[payRunDriver.driverId.toString()] || [];
+
+      // Calculate gross amount (from pay run driver record)
+      const totalAmount = parseFloat(payRunDriver.netPay || 0);
+
+      // Calculate deductions (example: tax at 30%)
+      // Note: This is a simplified calculation. In production, you may want to:
+      // - Use driver-specific tax rates
+      // - Calculate based on employment type
+      // - Include other deductions (superannuation, etc.)
+      const taxRate = 0.3; // 30% tax rate (example)
+      const taxAmount = totalAmount * taxRate;
+      const deductions = [
+        {
+          description: "Tax Withholding",
+          amount: taxAmount.toFixed(2),
+        },
+      ];
+
+      const totalDeductions = deductions.reduce(
+        (sum, ded) => sum + parseFloat(ded.amount),
+        0
+      );
+
+      // Calculate net amount
+      const netAmount = totalAmount - totalDeductions;
+
+      // Format items
+      const formattedItems = driverItems.map((item) => {
+        let itemDate = item.createdAt;
+
+        // Get date from job or adjustment
+        if (item.kind === "JOB" && item.jobId) {
+          if (item.jobId.completedAt) {
+            itemDate = item.jobId.completedAt;
+          } else if (item.jobId.date) {
+            itemDate = new Date(item.jobId.date + "T00:00:00");
+          }
+        } else if (item.kind === "ADJUSTMENT" && item.driverAdjustmentId) {
+          itemDate = item.driverAdjustmentId.effectiveDate || item.createdAt;
+        }
+
+        return {
+          itemId: item._id.toString(),
+          jobId: item.jobId ? item.jobId._id.toString() : null,
+          jobNumber: item.jobId?.jobNumber || null,
+          adjustmentId: item.driverAdjustmentId
+            ? item.driverAdjustmentId._id.toString()
+            : null,
+          description: item.description || (item.jobId ? `Job ${item.jobId.jobNumber}` : "Adjustment"),
+          date: itemDate ? new Date(itemDate).toISOString() : item.createdAt.toISOString(),
+          amount: parseFloat(item.amount || 0).toFixed(2),
+          type: item.kind,
+        };
+      });
+
+      // Get bank account information from driver
+      const bankAccount = {
+        bsb: driver?.bsb || "",
+        accountNumber: driver?.accountNumber || "",
+        accountName: driver?.accountName || driverName,
+      };
+
+      return {
+        driverId: driver ? driver._id.toString() : payRunDriver.driverId.toString(),
+        driverCode: driver?.driverCode || "N/A",
+        driverName: driverName,
+        bankAccount: bankAccount,
+        totalAmount: totalAmount.toFixed(2),
+        items: formattedItems,
+        deductions: deductions,
+        netAmount: netAmount.toFixed(2),
+      };
+    });
+
+    // Calculate totals
+    const totalAmount = remittances.reduce(
+      (sum, rem) => sum + parseFloat(rem.totalAmount),
+      0
+    );
+
+    // Format pay run label
+    const formatDate = (date) => {
+      const d = new Date(date);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+
+    const payRunLabel =
+      payRun.label ||
+      `${formatDate(payRun.periodStart)} to ${formatDate(payRun.periodEnd)}`;
+
+    // Prepare response data
+    const responseData = {
+      payRunId: payRun._id.toString(),
+      payRunLabel: payRunLabel,
+      periodStart: payRun.periodStart.toISOString(),
+      periodEnd: payRun.periodEnd.toISOString(),
+      cohortDays: payRun.cohortDays,
+      status: payRun.status,
+      totalAmount: totalAmount.toFixed(2),
+      totalDrivers: remittances.length,
+      generatedAt: new Date().toISOString(),
+      remittances: remittances,
+    };
+
+    // Return PDF if requested
+    if (format === "pdf") {
+      try {
+        const PDFDocument = require("pdfkit");
+        const pdfBuffer = await this.generateRemittancePDF(
+          responseData,
+          payRun
+        );
+        return {
+          success: true,
+          format: "pdf",
+          buffer: pdfBuffer,
+          filename: `remittances-${payRunLabel.replace(/\s+/g, "-")}.pdf`,
+        };
+      } catch (error) {
+        if (error.code === "MODULE_NOT_FOUND" && error.message.includes("pdfkit")) {
+          throw new AppError(
+            "PDF generation requires pdfkit package. Please install it: npm install pdfkit",
+            HttpStatusCodes.INTERNAL_SERVER_ERROR
+          );
+        }
+        throw error;
+      }
+    }
+
+    // Return JSON response
+    return {
+      success: true,
+      data: responseData,
+    };
+  }
+
+  /**
+   * Generate PDF document for remittances
+   * @param {Object} remittanceData - Remittance data object
+   * @param {Object} payRun - Pay run object
+   * @returns {Promise<Buffer>} PDF buffer
+   */
+  static async generateRemittancePDF(remittanceData, payRun) {
+    const PDFDocument = require("pdfkit");
+    return new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ margin: 50, size: "A4" });
+        const chunks = [];
+
+        // Collect PDF chunks
+        doc.on("data", (chunk) => chunks.push(chunk));
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+
+        // Helper function to format date
+        const formatDate = (dateString) => {
+          const d = new Date(dateString);
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        };
+
+        // Header Section
+        doc.fontSize(20).text("Pay Run Remittances", { align: "center" });
+        doc.moveDown();
+        doc.fontSize(12).text(`Pay Run: ${remittanceData.payRunLabel}`, {
+          align: "center",
+        });
+        doc.text(
+          `Period: ${formatDate(remittanceData.periodStart)} to ${formatDate(remittanceData.periodEnd)}`,
+          { align: "center" }
+        );
+        doc.text(`Cohort: ${remittanceData.cohortDays} Days | Status: ${remittanceData.status}`, {
+          align: "center",
+        });
+        doc.text(`Generated: ${formatDate(remittanceData.generatedAt)}`, {
+          align: "center",
+        });
+        doc.moveDown(2);
+
+        // Summary Section
+        doc.fontSize(14).text("Summary", { underline: true });
+        doc.moveDown(0.5);
+        doc.fontSize(11);
+        doc.text(`Total Amount: $${parseFloat(remittanceData.totalAmount).toFixed(2)}`);
+        doc.text(`Total Drivers: ${remittanceData.totalDrivers}`);
+        doc.moveDown(2);
+
+        // Driver Remittances Section
+        remittanceData.remittances.forEach((remittance, index) => {
+          // Page break if not first driver and near bottom of page
+          if (index > 0 && doc.y > 700) {
+            doc.addPage();
+          }
+
+          // Driver header
+          doc.fontSize(12).text(
+            `Driver: ${remittance.driverCode} - ${remittance.driverName}`,
+            { underline: true }
+          );
+          doc.moveDown(0.5);
+          doc.fontSize(10);
+          doc.text(
+            `Bank: BSB ${remittance.bankAccount.bsb || "N/A"}, Account ${remittance.bankAccount.accountNumber || "N/A"}`
+          );
+          doc.text(`Account Name: ${remittance.bankAccount.accountName}`);
+          doc.moveDown();
+
+          // Items Table
+          if (remittance.items.length > 0) {
+            doc.fontSize(11).text("Payment Items:", { underline: true });
+            doc.moveDown(0.3);
+
+            // Table header
+            const tableTop = doc.y;
+            doc.fontSize(9);
+            doc.text("Date", 50, tableTop);
+            doc.text("Description", 120, tableTop);
+            doc.text("Job #", 280, tableTop);
+            doc.text("Amount", 350, tableTop, { align: "right" });
+            doc
+              .moveTo(50, doc.y + 5)
+              .lineTo(550, doc.y + 5)
+              .stroke();
+            doc.moveDown(0.3);
+
+            // Table rows
+            remittance.items.forEach((item) => {
+              const itemDate = formatDate(item.date);
+              doc.text(itemDate, 50);
+              doc.text(item.description.substring(0, 30), 120);
+              doc.text(item.jobNumber || "-", 280);
+              doc.text(`$${parseFloat(item.amount).toFixed(2)}`, 350, null, {
+                align: "right",
+              });
+              doc.moveDown(0.4);
+            });
+          } else {
+            doc.fontSize(10).text("No payment items", { italic: true });
+            doc.moveDown();
+          }
+
+          // Deductions
+          if (remittance.deductions.length > 0) {
+            doc.moveDown(0.5);
+            doc.fontSize(11).text("Deductions:", { underline: true });
+            doc.moveDown(0.3);
+
+            remittance.deductions.forEach((deduction) => {
+              doc.fontSize(10);
+              doc.text(deduction.description, 50);
+              doc.text(`$${parseFloat(deduction.amount).toFixed(2)}`, 350, null, {
+                align: "right",
+              });
+              doc.moveDown(0.4);
+            });
+          }
+
+          // Totals
+          doc.moveDown(0.5);
+          doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+          doc.moveDown(0.3);
+          doc.fontSize(11);
+          doc.text(
+            `Gross Amount: $${parseFloat(remittance.totalAmount).toFixed(2)}`,
+            { align: "right" }
+          );
+          const totalDeductions = remittance.deductions.reduce(
+            (sum, ded) => sum + parseFloat(ded.amount),
+            0
+          );
+          doc.text(`Total Deductions: $${totalDeductions.toFixed(2)}`, {
+            align: "right",
+          });
+          doc.fontSize(12).text(
+            `Net Amount: $${parseFloat(remittance.netAmount).toFixed(2)}`,
+            { align: "right", bold: true }
+          );
+          doc.moveDown(2);
+        });
+
+        // Footer on each page
+        // Note: We need to finalize the document first to get accurate page count
+        // Then add footers using the page range
+        const pageRange = doc.bufferedPageRange();
+        const startPage = pageRange.start || 0;
+        const pageCount = pageRange.count || 1;
+        
+        for (let i = startPage; i < startPage + pageCount; i++) {
+          try {
+            doc.switchToPage(i);
+            doc
+              .fontSize(8)
+              .text(
+                `Page ${i - startPage + 1} of ${pageCount}`,
+                50,
+                doc.page.height - 50,
+                { align: "center" }
+              );
+            doc.text("Confidential - For internal use only", 50, doc.page.height - 40, {
+              align: "center",
+              italic: true,
+            });
+          } catch (error) {
+            // Skip if page doesn't exist
+            console.warn(`Could not add footer to page ${i}:`, error.message);
+          }
+        }
+
+        // Finalize PDF
+        doc.end();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
 }
 
 module.exports = PayRunService;
