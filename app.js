@@ -291,6 +291,8 @@ app.use("/api/v1", allocatorRoutes);
 app.use("/api/v1/invoices", invoiceRoutes);
 app.use("/api/v1/pay-runs", payRunRoutes);
 app.use("/api/v1/receivables", receivablesRoutes);
+const jobsRoutes = require("./src/api/v1/routes/jobs");
+app.use("/api/v1/jobs", jobsRoutes);
 // app.use("/api/v1/cron", cronRoutes);
 
 // Import controllers and middleware for upload routes

@@ -8,25 +8,19 @@ class DashboardController {
    * GET /api/v1/dashboard/stats
    */
   static getDashboardStats = catchAsyncHandler(async (req, res) => {
-    // Check if user has permission or is a driver
-    const userRole = req.user.role;
-    const hasPermission = req.user.permissions?.includes("operations.dashboard.view") || req.user.isSuperAdmin;
+    const user = req.user;
 
-    // For drivers, check if they're approved
-    if (userRole === "DRIVER") {
-      const driverData = await MasterDataService.getAllDrivers({ userId: req.user.id }, req.user);
+    // Check permissions according to guide
+    const hasAccess = checkDashboardAccess(user);
 
-      if (!driverData || driverData.driverStatus !== "COMPLIANT" || !driverData.isActive) {
-        return res.status(403).json({
-          message: "Driver account not approved. Please complete your induction.",
-          requiresApproval: true,
-        });
-      }
-    } else if (!hasPermission) {
-      return res.status(403).json({ message: "Insufficient permissions" });
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Insufficient permissions",
+      });
     }
 
-    const stats = await DashboardService.getDashboardStats(req.user);
+    const stats = await DashboardService.getDashboardStats(user);
     return res.status(200).json(stats);
   });
 
@@ -35,25 +29,19 @@ class DashboardController {
    * GET /api/v1/dashboard/today-jobs
    */
   static getTodayJobs = catchAsyncHandler(async (req, res) => {
-    // Check if user has permission or is a driver
-    const userRole = req.user.role;
-    const hasPermission = req.user.permissions?.includes("operations.dashboard.view") || req.user.isSuperAdmin;
+    const user = req.user;
 
-    // For drivers, check if they're approved
-    if (userRole === "DRIVER") {
-      const driverData = await MasterDataService.getAllDrivers({ userId: req.user.id }, req.user);
+    // Check permissions according to guide
+    const hasAccess = checkDashboardAccess(user);
 
-      if (!driverData || driverData.driverStatus !== "COMPLIANT" || !driverData.isActive) {
-        return res.status(403).json({
-          message: "Driver account not approved. Please complete your induction.",
-          requiresApproval: true,
-        });
-      }
-    } else if (!hasPermission) {
-      return res.status(403).json({ message: "Insufficient permissions" });
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Insufficient permissions",
+      });
     }
 
-    const jobs = await DashboardService.getTodayJobs(req.user);
+    const jobs = await DashboardService.getTodayJobs(user);
     return res.status(200).json(jobs);
   });
 
@@ -62,16 +50,68 @@ class DashboardController {
    * GET /api/v1/dashboard/active-drivers
    */
   static getActiveDrivers = catchAsyncHandler(async (req, res) => {
-    // Check if user has permission
-    const hasPermission = req.user.permissions?.includes("operations.dashboard.view") || req.user.isSuperAdmin;
+    const user = req.user;
 
-    if (!hasPermission) {
-      return res.status(403).json({ message: "Insufficient permissions" });
+    // Check permissions according to guide
+    const hasAccess = checkDashboardAccess(user);
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Insufficient permissions",
+      });
     }
 
-    const drivers = await DashboardService.getActiveDrivers(req.user);
+    const drivers = await DashboardService.getActiveDrivers(user);
     return res.status(200).json(drivers);
   });
+}
+
+/**
+ * Check if user has dashboard access
+ * Based on guide requirements: SUPER_ADMIN, TENANT_ADMIN, or operations.dashboard.view permission
+ */
+function checkDashboardAccess(user) {
+  if (!user) return false;
+
+  // Super admin has all permissions
+  if (user.role === "SUPER_ADMIN" || user.isSuperAdmin === true) {
+    return true;
+  }
+
+  // Tenant admin has access within their organization
+  if (user.currentOrgRole === "TENANT_ADMIN") {
+    return true;
+  }
+
+  // Check organizations array
+  if (user.activeOrganizationId && user.organizations) {
+    const activeOrg = user.organizations.find(
+      (org) => org.id && org.id.toString() === user.activeOrganizationId.toString()
+    );
+    if (activeOrg?.orgRole === "TENANT_ADMIN") {
+      return true;
+    }
+  }
+
+  // Check for explicit permission
+  const permissions = user.permissions || [];
+  if (permissions.includes("operations.dashboard.view")) {
+    return true;
+  }
+
+  // Check role-based permissions
+  const rolePermissions = {
+    ADMIN: ["operations.dashboard.view"],
+    OPERATIONS: ["operations.dashboard.view"],
+    FINANCE: ["operations.dashboard.view"],
+  };
+
+  if (rolePermissions[user.role]) {
+    return rolePermissions[user.role].includes("operations.dashboard.view");
+  }
+
+  return false;
 }
 
 module.exports = DashboardController;

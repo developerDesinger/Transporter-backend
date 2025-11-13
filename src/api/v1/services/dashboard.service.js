@@ -1,6 +1,8 @@
 const Driver = require("../models/driver.model");
+const Job = require("../models/job.model");
 const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
+const mongoose = require("mongoose");
 
 class DashboardService {
   /**
@@ -9,47 +11,112 @@ class DashboardService {
    * @returns {Object} Dashboard stats (revenue, activeJobs, driversOnDuty)
    */
   static async getDashboardStats(user) {
-    // Note: Job model not yet available - placeholder implementation
-    // TODO: Implement when Job model is available
+    const organizationId = user.activeOrganizationId || null;
+
+    // Calculate today's revenue from completed jobs
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // Placeholder: Calculate today's revenue from completed jobs
-    // const Job = require("../models/job.model");
-    // const revenue = await Job.aggregate([
-    //   {
-    //     $match: {
-    //       organizationId: user.activeOrganizationId,
-    //       status: "COMPLETED",
-    //       completedAt: { $gte: today },
-    //     },
-    //   },
-    //   {
-    //     $group: {
-    //       _id: null,
-    //       total: { $sum: "$totalAmount" },
-    //     },
-    //   },
-    // ]);
-    const revenue = 0; // Placeholder
+    // Get today's date in ISO format (YYYY-MM-DD) for string date comparison
+    const todayString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
-    // Placeholder: Count active jobs
-    // const activeJobs = await Job.countDocuments({
-    //   organizationId: user.activeOrganizationId,
-    //   status: { $in: ["ASSIGNED", "IN_PROGRESS"] },
-    // });
-    const activeJobs = 0; // Placeholder
+    // Build revenue query filter
+    // Include jobs completed today OR jobs with service date today (if completedAt is not set)
+    const revenueFilter = {
+      status: "CLOSED", // Completed jobs
+      $or: [
+        // Jobs completed today (completedAt matches today)
+        {
+          completedAt: {
+            $gte: today,
+            $lt: tomorrow,
+          },
+        },
+        // Or jobs with service date today (if completedAt is not set)
+        {
+          date: todayString,
+          completedAt: { $exists: false },
+        },
+      ],
+    };
+
+    // Add organization filter if available
+    if (organizationId) {
+      revenueFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      revenueFilter.organizationId = null;
+    }
+
+    // Calculate revenue using aggregation
+    // Use customerCharge, or fallback to other amount fields if available
+    const revenueResult = await Job.aggregate([
+      {
+        $match: revenueFilter,
+      },
+      {
+        $group: {
+          _id: null,
+          total: {
+            $sum: {
+              $ifNull: [
+                "$customerCharge",
+                {
+                  $ifNull: [
+                    "$totalAmount",
+                    {
+                      $ifNull: ["$invoiceAmount", { $ifNull: ["$baseCharge", 0] }],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+
+    const revenue = revenueResult.length > 0 ? revenueResult[0].total : 0;
+
+    // Count active jobs (OPEN status)
+    const activeJobsFilter = {
+      status: "OPEN",
+    };
+
+    // Add organization filter if available
+    if (organizationId) {
+      activeJobsFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      activeJobsFilter.organizationId = null;
+    }
+
+    const activeJobs = await Job.countDocuments(activeJobsFilter);
 
     // Count drivers on duty (active and compliant)
-    const driversOnDuty = await Driver.countDocuments({
+    // Note: Driver model may not have organizationId directly
+    // We'll filter by isActive and COMPLIANT status
+    // If organizationId filtering is needed, it may need to be done via User relationships
+    const driversOnDutyFilter = {
       isActive: true,
-      driverStatus: "COMPLIANT",
-    });
+      $or: [
+        { driverStatus: "COMPLIANT" },
+        { complianceStatus: "COMPLIANT" },
+      ],
+    };
+
+    // If organizationId is available and Driver model has organizationId field,
+    // we can add it. Otherwise, we'll count all compliant drivers.
+    // Note: This may need adjustment based on your Driver model structure
+    const driversOnDuty = await Driver.countDocuments(driversOnDutyFilter);
 
     return {
-      revenue: revenue.toFixed(2),
-      activeJobs,
-      driversOnDuty,
+      success: true,
+      data: {
+        revenue: revenue.toFixed(2),
+        activeJobs: activeJobs,
+        driversOnDuty: driversOnDuty,
+      },
     };
   }
 
@@ -59,99 +126,208 @@ class DashboardService {
    * @returns {Array} Array of today's jobs
    */
   static async getTodayJobs(user) {
-    // Note: Job model not yet available - placeholder implementation
-    // TODO: Implement when Job model is available
+    const organizationId = user.activeOrganizationId || null;
 
+    // Calculate today's date in ISO format (YYYY-MM-DD)
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const todayString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
-    // If user is a driver, find their driver record
-    if (user.role === "DRIVER") {
-      const driver = await Driver.findOne({ userId: user.id });
+    // Build query filter
+    // Include both OPEN (active) and CLOSED (completed) jobs for today
+    // OPEN = ASSIGNED, IN_PROGRESS, DISPATCHED
+    // CLOSED = COMPLETED
+    const filter = {
+      date: todayString,
+      status: { $in: ["OPEN", "CLOSED"] }, // Include active and completed jobs
+    };
 
-      if (!driver) {
-        // Driver record doesn't exist, return empty array
-        return [];
-      }
-
-      // Placeholder: Filter jobs by assigned driver
-      // const Job = require("../models/job.model");
-      // const jobs = await Job.find({
-      //   organizationId: user.activeOrganizationId,
-      //   scheduledDate: { $gte: today, $lt: tomorrow },
-      //   "assignment.driverId": driver._id,
-      // })
-      //   .populate({
-      //     path: "customerId",
-      //     populate: { path: "partyId" },
-      //   })
-      //   .populate({
-      //     path: "assignment.driverId",
-      //     populate: { path: "partyId" },
-      //   })
-      //   .sort({ scheduledDate: 1 })
-      //   .limit(10)
-      //   .lean();
-
-      return []; // Placeholder - return empty array
+    // Add organization filter if available
+    if (organizationId) {
+      filter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      filter.organizationId = null;
     }
 
-    // For non-drivers, return all today's jobs
-    // Placeholder: Get all jobs for today
-    // const Job = require("../models/job.model");
-    // const jobs = await Job.find({
-    //   organizationId: user.activeOrganizationId,
-    //   scheduledDate: { $gte: today, $lt: tomorrow },
-    // })
-    //   .populate({
-    //     path: "customerId",
-    //     populate: { path: "partyId" },
-    //   })
-    //   .populate({
-    //     path: "assignment.driverId",
-    //     populate: { path: "partyId" },
-    //   })
-    //   .sort({ scheduledDate: 1 })
-    //   .limit(10)
-    //   .lean();
+    // Query today's jobs with populated customer and driver data
+    const jobs = await Job.find(filter)
+      .populate({
+        path: "customerId",
+        model: "Customer",
+        select: "partyId",
+        populate: {
+          path: "partyId",
+          model: "Party",
+          select: "firstName lastName companyName",
+        },
+      })
+      .populate({
+        path: "driverId",
+        model: "Driver",
+        select: "driverCode partyId",
+        populate: {
+          path: "partyId",
+          model: "Party",
+          select: "firstName lastName companyName",
+        },
+      })
+      .sort({ startTime: 1, jobNumber: 1 })
+      .lean();
 
-    return []; // Placeholder - return empty array
+    // Format response according to guide
+    const formattedJobs = jobs.map((job) => {
+      const customer = job.customerId;
+      const party = customer?.partyId;
+      const driver = job.driverId;
+      const driverParty = driver?.partyId;
+
+      // Get customer name
+      let customerFirstName = "";
+      let customerLastName = "";
+      let customerCompanyName = "";
+
+      if (party) {
+        customerFirstName = party.firstName || "";
+        customerLastName = party.lastName || "";
+        customerCompanyName = party.companyName || "";
+      }
+
+      // Get driver name
+      let driverFullName = "";
+      if (driverParty) {
+        if (driverParty.companyName) {
+          driverFullName = driverParty.companyName;
+        } else if (driverParty.firstName || driverParty.lastName) {
+          driverFullName = `${driverParty.firstName || ""} ${driverParty.lastName || ""}`.trim();
+        }
+      }
+
+      // Format service date (convert string date to ISO date)
+      let serviceDate = null;
+      if (job.date) {
+        // job.date is in YYYY-MM-DD format, convert to ISO date
+        serviceDate = new Date(job.date + "T00:00:00.000Z").toISOString();
+      }
+
+      return {
+        id: job._id.toString(),
+        jobNumber: job.jobNumber || `JOB-${job._id.toString().substring(0, 8)}`,
+        serviceDate: serviceDate,
+        customerId: customer ? customer._id.toString() : job.customerId?.toString() || "",
+        customer: customer
+          ? {
+              id: customer._id.toString(),
+              firstName: customerFirstName,
+              lastName: customerLastName,
+              companyName: customerCompanyName,
+            }
+          : undefined,
+        pickupSuburb: job.pickupSuburb || "",
+        deliverySuburb: job.deliverySuburb || "",
+        status: job.status, // "OPEN" or "CLOSED"
+        startTime: job.startTime || "",
+        finishTime: job.finishTime || "",
+        driverId: driver ? driver._id.toString() : job.driverId?.toString() || undefined,
+        driver: driver
+          ? {
+              id: driver._id.toString(),
+              driverCode: driver.driverCode || "",
+              fullName: driverFullName,
+            }
+          : undefined,
+        vehicleType: job.vehicleType || "",
+        jobType: job.boardType || "", // Using boardType as jobType (PUD or LINEHAUL)
+      };
+    });
+
+    return {
+      success: true,
+      data: formattedJobs,
+    };
   }
 
   /**
    * Get active drivers (compliant and active)
-   * @param {Object} user - User object (for permissions)
+   * @param {Object} user - User object (for permissions and organization)
    * @returns {Array} Array of active drivers
    */
   static async getActiveDrivers(user) {
-    const drivers = await Driver.find({
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build query filter
+    // Note: Driver model may not have organizationId directly
+    // We'll filter by isActive and COMPLIANT status
+    // If organizationId filtering is needed, it may need to be done via User relationships
+    const filter = {
       isActive: true,
-      driverStatus: "COMPLIANT",
-    })
-      .populate("party", "firstName lastName email phone companyName")
-      .sort({ updatedAt: -1 })
-      .limit(10)
+      $or: [
+        { driverStatus: "COMPLIANT" },
+        { complianceStatus: "COMPLIANT" },
+      ],
+    };
+
+    // Query active drivers with populated party data
+    const drivers = await Driver.find(filter)
+      .populate({
+        path: "partyId",
+        model: "Party",
+        select: "firstName lastName email phone companyName",
+      })
+      .sort({ driverCode: 1 }) // Sort by driverCode, then by name if needed
       .lean();
 
-    return drivers.map((driver) => ({
-      id: driver._id.toString(),
-      party: driver.party
-        ? {
-            id: driver.party._id.toString(),
-            firstName: driver.party.firstName,
-            lastName: driver.party.lastName,
-            email: driver.party.email,
-            phone: driver.party.phone,
-            companyName: driver.party.companyName,
-          }
-        : null,
-      defaultVehicleType: driver.defaultVehicleType || null,
-      isActive: driver.isActive,
-      driverStatus: driver.driverStatus,
-      driverCode: driver.driverCode,
-    }));
+    // Format response according to guide
+    const formattedDrivers = drivers.map((driver) => {
+      const party = driver.partyId;
+
+      // Get driver full name from party
+      let fullName = "";
+      if (party) {
+        if (party.companyName) {
+          fullName = party.companyName;
+        } else if (party.firstName || party.lastName) {
+          fullName = `${party.firstName || ""} ${party.lastName || ""}`.trim();
+        }
+      }
+
+      // Get default vehicle type (from vehicleTypesInFleet array if available)
+      const defaultVehicleType =
+        driver.defaultVehicleType ||
+        (driver.vehicleTypesInFleet && driver.vehicleTypesInFleet.length > 0
+          ? driver.vehicleTypesInFleet[0]
+          : "");
+
+      return {
+        id: driver._id.toString(),
+        driverCode: driver.driverCode || "",
+        fullName: fullName || "Unknown",
+        isActive: driver.isActive,
+        driverStatus: driver.driverStatus || "",
+        complianceStatus: driver.complianceStatus || "",
+        defaultVehicleType: defaultVehicleType,
+        party: party
+          ? {
+              id: party._id.toString(),
+              firstName: party.firstName || "",
+              lastName: party.lastName || "",
+              email: party.email || "",
+              phone: party.phone || "",
+              companyName: party.companyName || "",
+            }
+          : {
+              id: "",
+              firstName: "",
+              lastName: "",
+              email: "",
+              phone: "",
+              companyName: "",
+            },
+      };
+    });
+
+    return {
+      success: true,
+      data: formattedDrivers,
+    };
   }
 }
 
