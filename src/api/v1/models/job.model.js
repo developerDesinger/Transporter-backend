@@ -128,6 +128,11 @@ const JobSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    closedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );

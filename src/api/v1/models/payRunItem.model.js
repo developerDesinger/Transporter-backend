@@ -5,7 +5,7 @@ const PayRunItemSchema = new mongoose.Schema(
     payrunId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "PayRun",
-      required: true,
+      default: null, // NULL until attached to a pay run
       index: true,
     },
     driverId: {

@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const AllocatorController = require("../controller/AllocatorController");
+const JobController = require("../controller/JobController");
 const { isAuthenticated } = require("../middlewares/auth.middleware");
 const { requirePermission } = require("../middlewares/permission.middleware");
 const multer = require("multer");
@@ -114,6 +115,14 @@ router.get(
 );
 
 // ==================== JOB MANAGEMENT ====================
+
+// GET /api/v1/jobs/close-view - Get jobs for close view with filtering
+// ⚠️ CRITICAL: This route MUST be defined BEFORE /jobs/:id to prevent "close-view" from being matched as an :id parameter
+router.get(
+  "/jobs/close-view",
+  requirePermission("operations.jobs.view"),
+  JobController.getCloseViewJobs
+);
 
 // GET /api/v1/jobs/:id - Get job details
 router.get(
