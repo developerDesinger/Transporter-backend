@@ -113,6 +113,30 @@ router.get(
 );
 
 /**
+ * @route   GET /api/v1/reports/top-performers
+ * @desc    Get top performers report
+ * @access  Authenticated (requires operations.reports.view permission)
+ */
+router.get(
+  "/top-performers",
+  isAuthenticated,
+  requirePermission("operations.reports.view"),
+  ReportController.getTopPerformersReport
+);
+
+/**
+ * @route   GET /api/v1/reports/revenue-overview
+ * @desc    Get revenue overview report (weekly)
+ * @access  Authenticated (requires financials.reports.view permission)
+ */
+router.get(
+  "/revenue-overview",
+  isAuthenticated,
+  requirePermission("financials.reports.view"),
+  ReportController.getRevenueOverview
+);
+
+/**
  * @route   GET /api/v1/reports/export
  * @desc    Export report data (CSV, Excel, PDF)
  * @access  Authenticated (requires operations.reports.export permission)

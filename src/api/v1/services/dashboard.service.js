@@ -1,4 +1,5 @@
 const Driver = require("../models/driver.model");
+const ActivityService = require("./activity.service");
 const Job = require("../models/job.model");
 const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
@@ -329,7 +330,159 @@ class DashboardService {
       data: formattedDrivers,
     };
   }
+
+  /**
+   * Get active jobs for dashboard widget
+   * @param {Object} query - filters (type, status, limit)
+   * @param {Object} user - authenticated user
+   * @returns {Object} { data, summary }
+   */
+  static async getActiveJobs(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+    const allowedTypes = ["PUD", "LINEHAUL"];
+    const allowedStatuses = [
+      "OPEN",
+      "ASSIGNED",
+      "IN_PROGRESS",
+      "DISPATCHED",
+      "READY_TO_DELIVER",
+      "LOADING",
+    ];
+
+    const jobTypeFilter = query.type
+      ? query.type.toString().toUpperCase()
+      : null;
+
+    if (jobTypeFilter && !allowedTypes.includes(jobTypeFilter)) {
+      throw new AppError("Invalid job type", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const statusFilter = query.status
+      ? query.status.toString().toUpperCase()
+      : null;
+
+    if (statusFilter && !allowedStatuses.includes(statusFilter)) {
+      throw new AppError("Invalid status filter", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const limit =
+      query.limit && !Number.isNaN(parseInt(query.limit, 10))
+        ? Math.min(Math.max(parseInt(query.limit, 10), 1), 50)
+        : 20;
+
+    const matchFilter = {
+      status: statusFilter ? statusFilter : { $in: allowedStatuses },
+    };
+
+    if (organizationId) {
+      matchFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    }
+
+    if (jobTypeFilter) {
+      matchFilter.boardType = jobTypeFilter;
+    }
+
+    const jobs = await Job.find(matchFilter)
+      .select(
+        "jobNumber boardType status customerId pickupSuburb deliverySuburb vehicleType date driverId"
+      )
+      .populate({
+        path: "customerId",
+        select: "partyId",
+        populate: {
+          path: "partyId",
+          select: "companyName firstName lastName",
+        },
+      })
+      .populate({
+        path: "driverId",
+        select: "driverCode partyId",
+        populate: {
+          path: "partyId",
+          select: "companyName firstName lastName",
+        },
+      })
+      .sort({ date: 1, jobNumber: 1 })
+      .limit(limit)
+      .lean();
+
+    // Summary counts by type
+    const summaryPipeline = [
+      { $match: matchFilter },
+      {
+        $group: {
+          _id: "$boardType",
+          count: { $sum: 1 },
+        },
+      },
+    ];
+    const summaryResults = await Job.aggregate(summaryPipeline);
+    const summary = {
+      PUD: 0,
+      LINEHAUL: 0,
+    };
+    summaryResults.forEach((item) => {
+      const type = item._id || "PUD";
+      if (summary[type] !== undefined) {
+        summary[type] = item.count;
+      }
+    });
+
+    const formattedJobs = jobs.map((job) => {
+      const customerParty = job.customerId?.partyId;
+      const driver = job.driverId;
+      const driverParty = driver?.partyId;
+
+      const driverName =
+        driverParty?.companyName ||
+        [driverParty?.firstName, driverParty?.lastName].filter(Boolean).join(" ") ||
+        null;
+
+      const eta = combineJobDateTime(job.date);
+
+      return {
+        id: job._id.toString(),
+        jobNumber: job.jobNumber || `JOB-${job._id.toString().slice(-6)}`,
+        jobType: job.boardType || "PUD",
+        status: job.status,
+        customerName:
+          customerParty?.companyName ||
+          [customerParty?.firstName, customerParty?.lastName]
+            .filter(Boolean)
+            .join(" ") ||
+          "Unknown Customer",
+        pickupSuburb: job.pickupSuburb || null,
+        deliverySuburb: job.deliverySuburb || null,
+        vehicleType: job.vehicleType || null,
+        driverName,
+        driverCode: driver?.driverCode || null,
+        eta,
+        progressPercent: 0,
+        canTrack: Boolean(driver?._id),
+      };
+    });
+
+    return {
+      data: formattedJobs,
+      summary,
+    };
+  }
+
+  /**
+   * Get recent activity events for dashboard widget
+   */
+  static async getRecentActivity(query, user) {
+    const result = await ActivityService.getRecentActivity(query, user);
+    return result;
+  }
 }
 
 module.exports = DashboardService;
+
+function combineJobDateTime(dateStr, fallbackTime = "08:00") {
+  if (!dateStr) return null;
+  const date = new Date(`${dateStr}T${fallbackTime}:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
 

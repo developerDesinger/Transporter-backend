@@ -11,6 +11,38 @@ const User = require("../models/user.model");
 const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
 const mongoose = require("mongoose");
+const moment = require("moment-timezone");
+
+const DEFAULT_CURRENCY = process.env.DEFAULT_CURRENCY || "AUD";
+const DEFAULT_TIMEZONE = process.env.DEFAULT_TIMEZONE || "UTC";
+const REVENUE_OVERVIEW_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const revenueOverviewCache = new Map();
+const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+const getFirstValidTimezone = (...candidates) => {
+  for (const candidate of candidates) {
+    if (candidate && moment.tz.zone(candidate)) {
+      return candidate;
+    }
+  }
+  return "UTC";
+};
+
+const normalizeNumericValue = (value) => {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
+    const parsed = parseFloat(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  if (typeof value === "object" && typeof value.toString === "function") {
+    const parsed = parseFloat(value.toString());
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+};
+
+const roundToTwo = (value) => Number(normalizeNumericValue(value).toFixed(2));
 
 class ReportService {
   /**
@@ -1685,6 +1717,576 @@ class ReportService {
     return {
       jobs: formattedJobs,
     };
+  }
+
+  /**
+   * Get revenue overview for dashboard (weekly series + trend)
+   * @param {Object} query - Query params (startDate, endDate, timezone)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Revenue overview data
+   */
+  static async getRevenueOverview(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+    const { startDate, endDate } = query || {};
+
+    if (!startDate || !endDate) {
+      throw new AppError(
+        "startDate and endDate are required",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Resolve timezone preference (query > user preference > env > UTC)
+    const timezone = getFirstValidTimezone(
+      query.timezone,
+      user?.timezone,
+      user?.preferences?.timezone,
+      user?.profile?.timezone,
+      DEFAULT_TIMEZONE
+    );
+
+    const startMoment = moment.tz(startDate, timezone);
+    const endMoment = moment.tz(endDate, timezone);
+
+    if (!startMoment.isValid() || !endMoment.isValid()) {
+      throw new AppError(
+        "startDate and endDate must be valid ISO dates (YYYY-MM-DD)",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const startOfDay = startMoment.clone().startOf("day");
+    const endOfDay = endMoment.clone().startOf("day");
+
+    if (endOfDay.isBefore(startOfDay)) {
+      throw new AppError(
+        "endDate must be greater than or equal to startDate",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const spanDays = endOfDay.diff(startOfDay, "days");
+    if (spanDays !== 6) {
+      throw new AppError(
+        "startDate and endDate must cover exactly 7 days",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Snap to Monday -> Sunday window to keep buckets consistent
+    const normalizedStart = startOfDay.clone().isoWeekday(1);
+    const normalizedEnd = normalizedStart.clone().add(6, "days").endOf("day");
+
+    const cacheKey = `${
+      organizationId || "unscoped"
+    }:${normalizedStart.format("YYYY-MM-DD")}:${timezone}`;
+    const cached = revenueOverviewCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
+    }
+
+    // Aggregate current week revenue grouped by day
+    const currentWeekBuckets = await this.aggregateRevenueData({
+      startMoment: normalizedStart,
+      endMoment: normalizedEnd,
+      timezone,
+      organizationId,
+      groupByDay: true,
+    });
+
+    const totalsMap = new Map();
+    currentWeekBuckets.forEach((bucket) => {
+      if (bucket && bucket._id) {
+        totalsMap.set(bucket._id, normalizeNumericValue(bucket.total));
+      }
+    });
+
+    let currentWeekTotal = 0;
+    const series = DAY_LABELS.map((label, index) => {
+      const dayMoment = normalizedStart.clone().add(index, "days");
+      const isoDate = dayMoment.format("YYYY-MM-DD");
+      const value = totalsMap.get(isoDate) ?? 0;
+      currentWeekTotal += value;
+      return {
+        day: label,
+        date: isoDate,
+        value: roundToTwo(value),
+      };
+    });
+
+    const previousWeekTotalRaw = await this.aggregateRevenueData({
+      startMoment: normalizedStart.clone().subtract(7, "days"),
+      endMoment: normalizedEnd.clone().subtract(7, "days"),
+      timezone,
+      organizationId,
+      groupByDay: false,
+    });
+
+    const roundedCurrentWeek = roundToTwo(currentWeekTotal);
+    const roundedPreviousWeek = roundToTwo(previousWeekTotalRaw);
+
+    let trendPercent = 0;
+    if (roundedPreviousWeek > 0) {
+      trendPercent =
+        ((roundedCurrentWeek - roundedPreviousWeek) / roundedPreviousWeek) *
+        100;
+    }
+
+    const response = {
+      trendPercent: roundToTwo(trendPercent),
+      currency: DEFAULT_CURRENCY,
+      series,
+    };
+
+    revenueOverviewCache.set(cacheKey, {
+      data: response,
+      expiresAt: Date.now() + REVENUE_OVERVIEW_CACHE_TTL_MS,
+    });
+
+    return response;
+  }
+
+  /**
+   * Aggregate revenue data for a date range
+   * @param {Object} params
+   * @returns {Promise<Array|number>} Aggregated data
+   */
+  static async aggregateRevenueData({
+    startMoment,
+    endMoment,
+    timezone,
+    organizationId,
+    groupByDay = false,
+  }) {
+    if (!moment.isMoment(startMoment) || !moment.isMoment(endMoment)) {
+      throw new AppError(
+        "Invalid date range for revenue aggregation",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const startUtc = startMoment.clone().tz("UTC").toDate();
+    const endUtc = endMoment.clone().tz("UTC").toDate();
+
+    if (startUtc > endUtc) {
+      throw new AppError(
+        "Invalid date window for revenue aggregation",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    let organizationObjectId = null;
+    if (organizationId) {
+      if (organizationId instanceof mongoose.Types.ObjectId) {
+        organizationObjectId = organizationId;
+      } else if (mongoose.Types.ObjectId.isValid(organizationId)) {
+        organizationObjectId = new mongoose.Types.ObjectId(organizationId);
+      } else {
+        throw new AppError(
+          "Invalid organization ID format",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+    }
+
+    const matchStage = {
+      status: "CLOSED",
+    };
+
+    if (organizationObjectId) {
+      matchStage.organizationId = organizationObjectId;
+    } else {
+      matchStage.organizationId = null;
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      {
+        $addFields: {
+          revenueDate: {
+            $let: {
+              vars: {
+                completedOrClosed: {
+                  $cond: [
+                    { $ne: ["$completedAt", null] },
+                    "$completedAt",
+                    {
+                      $cond: [
+                        { $ne: ["$closedAt", null] },
+                        "$closedAt",
+                        null,
+                      ],
+                    },
+                  ],
+                },
+              },
+              in: {
+                $ifNull: [
+                  "$$completedOrClosed",
+                  {
+                    $cond: [
+                      { $ne: ["$date", null] },
+                      {
+                        $dateFromString: {
+                          dateString: { $concat: ["$date", "T00:00:00.000Z"] },
+                          onError: null,
+                        },
+                      },
+                      null,
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          revenueAmount: {
+            $ifNull: [
+              "$customerCharge",
+              {
+                $ifNull: [
+                  "$totalAmount",
+                  {
+                    $ifNull: [
+                      "$invoiceAmount",
+                      {
+                        $ifNull: ["$baseCharge", 0],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      {
+        $match: {
+          revenueDate: { $ne: null },
+        },
+      },
+      {
+        $match: {
+          revenueDate: {
+            $gte: startUtc,
+            $lte: endUtc,
+          },
+        },
+      },
+    ];
+
+    if (groupByDay) {
+      pipeline.push({
+        $group: {
+          _id: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$revenueDate",
+              timezone: timezone || "UTC",
+            },
+          },
+          total: { $sum: "$revenueAmount" },
+        },
+      });
+      pipeline.push({ $sort: { _id: 1 } });
+      return Job.aggregate(pipeline);
+    }
+
+    pipeline.push({
+      $group: {
+        _id: null,
+        total: { $sum: "$revenueAmount" },
+      },
+    });
+
+    const totals = await Job.aggregate(pipeline);
+    return totals.length > 0 ? totals[0].total || 0 : 0;
+  }
+
+  /**
+   * Get top performers report
+   */
+  static async getTopPerformersReport(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+    const limit =
+      query.limit && !Number.isNaN(parseInt(query.limit, 10))
+        ? Math.min(Math.max(parseInt(query.limit, 10), 1), 20)
+        : 5;
+
+    const timezone =
+      query.timezone ||
+      user?.timezone ||
+      user?.preferences?.timezone ||
+      user?.profile?.timezone ||
+      DEFAULT_TIMEZONE;
+
+    const todayTz = moment.tz(timezone);
+    const defaultStart = todayTz.clone().startOf("month");
+    const defaultEnd = todayTz.clone().endOf("month");
+
+    const startDateMoment = query.startDate
+      ? moment.tz(query.startDate, timezone)
+      : defaultStart;
+    const endDateMoment = query.endDate
+      ? moment.tz(query.endDate, timezone)
+      : defaultEnd;
+
+    if (!startDateMoment.isValid() || !endDateMoment.isValid()) {
+      throw new AppError(
+        "Invalid date range",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    if (endDateMoment.isBefore(startDateMoment)) {
+      throw new AppError(
+        "endDate must be greater than or equal to startDate",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    const startDate = startDateMoment.clone().startOf("day").toDate();
+    const endDate = endDateMoment.clone().endOf("day").toDate();
+
+    const rangeMillis = endDate.getTime() - startDate.getTime();
+    const previousEndMoment = startDateMoment
+      .clone()
+      .subtract(1, "day")
+      .endOf("day");
+    const previousStartMoment = previousEndMoment
+      .clone()
+      .subtract(rangeMillis, "milliseconds")
+      .startOf("day");
+
+    const currentStats = await this.aggregateDriverPerformance(
+      startDate,
+      endDate,
+      organizationId
+    );
+
+    if (currentStats.length === 0) {
+      return [];
+    }
+
+    const previousStats = await this.aggregateDriverPerformance(
+      previousStartMoment.toDate(),
+      previousEndMoment.toDate(),
+      organizationId
+    );
+
+    const previousMap = new Map();
+    previousStats.forEach((stat) =>
+      previousMap.set(stat.driverId.toString(), stat)
+    );
+
+    const driverIds = currentStats.map((stat) => stat.driverId);
+    const drivers = await Driver.find({ _id: { $in: driverIds } })
+      .select("driverCode partyId")
+      .populate({
+        path: "partyId",
+        select: "companyName firstName lastName",
+      })
+      .lean();
+
+    const driverInfo = new Map();
+    drivers.forEach((driver) => {
+      driverInfo.set(driver._id.toString(), driver);
+    });
+
+    const maxRevenue = currentStats.reduce(
+      (max, stat) => Math.max(max, stat.revenue || 0),
+      0
+    );
+    const maxJobs = currentStats.reduce(
+      (max, stat) => Math.max(max, stat.jobs || 0),
+      0
+    );
+
+    const performers = currentStats
+      .map((stat) => {
+        const driverIdStr = stat.driverId.toString();
+        const driver = driverInfo.get(driverIdStr);
+        const party = driver?.partyId;
+        const driverName =
+          party?.companyName ||
+          [party?.firstName, party?.lastName].filter(Boolean).join(" ") ||
+          "Unknown Driver";
+
+        const onTimePercent =
+          stat.jobs > 0 ? Math.round((stat.onTime / stat.jobs) * 100) : 0;
+
+        const revenueScore =
+          maxRevenue > 0 ? (stat.revenue / maxRevenue) * 100 : 0;
+        const jobsScore = maxJobs > 0 ? (stat.jobs / maxJobs) * 100 : 0;
+        const performancePercent = Math.round(
+          0.5 * revenueScore + 0.2 * jobsScore + 0.3 * onTimePercent
+        );
+
+        const rating =
+          stat.jobs > 0
+            ? Number((4.4 + Math.min(onTimePercent / 120, 0.5)).toFixed(1))
+            : 4.4;
+
+        const previous = previousMap.get(driverIdStr);
+        let trendPercent = 0;
+        if (previous && previous.revenue > 0) {
+          trendPercent = Number(
+            (
+              ((stat.revenue - previous.revenue) / previous.revenue) *
+              100
+            ).toFixed(1)
+          );
+        }
+
+        return {
+          driverId: driverIdStr,
+          driverName,
+          driverCode: driver?.driverCode || null,
+          revenue: Math.round(stat.revenue || 0),
+          jobs: stat.jobs,
+          onTimePercent,
+          rating,
+          performancePercent,
+          trendPercent,
+        };
+      })
+      .sort((a, b) => b.performancePercent - a.performancePercent)
+      .slice(0, limit);
+
+    return performers;
+  }
+
+  static async aggregateDriverPerformance(startDate, endDate, organizationId) {
+    const matchStage = {
+      driverId: { $ne: null },
+      status: "CLOSED",
+    };
+
+    if (organizationId) {
+      matchStage.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      matchStage.organizationId = null;
+    }
+
+    const pipeline = [
+      { $match: matchStage },
+      {
+        $addFields: {
+          completionDate: {
+            $let: {
+              vars: {
+                dateString: "$date",
+              },
+              in: {
+                $ifNull: [
+                  "$completedAt",
+                  {
+                    $ifNull: [
+                      "$closedAt",
+                      {
+                        $cond: [
+                          {
+                            $and: [
+                              { $ne: ["$$dateString", null] },
+                              { $ne: ["$$dateString", ""] },
+                            ],
+                          },
+                          {
+                            $dateFromString: {
+                              dateString: {
+                                $concat: ["$$dateString", "T00:00:00.000Z"],
+                              },
+                              onError: null,
+                            },
+                          },
+                          null,
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          scheduledDue: {
+            $let: {
+              vars: {
+                dateString: "$date",
+              },
+              in: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$$dateString", null] },
+                      { $ne: ["$$dateString", ""] },
+                    ],
+                  },
+                  {
+                    $dateFromString: {
+                      dateString: {
+                        $concat: ["$$dateString", "T23:59:59.999Z"],
+                      },
+                      onError: null,
+                    },
+                  },
+                  null,
+                ],
+              },
+            },
+          },
+          revenueAmount: {
+            $ifNull: [
+              "$customerCharge",
+              {
+                $ifNull: [
+                  "$totalAmount",
+                  {
+                    $ifNull: ["$invoiceAmount", { $ifNull: ["$baseCharge", 0] }],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      {
+        $match: {
+          completionDate: {
+            $gte: startDate,
+            $lte: endDate,
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$driverId",
+          jobs: { $sum: 1 },
+          revenue: { $sum: "$revenueAmount" },
+          onTime: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$completionDate", null] },
+                    { $ne: ["$scheduledDue", null] },
+                    { $lte: ["$completionDate", "$scheduledDue"] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+    ];
+
+    const stats = await Job.aggregate(pipeline);
+    return stats.map((stat) => ({
+      driverId: stat._id,
+      jobs: stat.jobs || 0,
+      revenue: Number(stat.revenue || 0),
+      onTime: stat.onTime || 0,
+    }));
   }
 
   /**

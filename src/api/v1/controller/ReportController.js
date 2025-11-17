@@ -111,6 +111,33 @@ class ReportController {
   });
 
   /**
+   * Get revenue overview report
+   * GET /api/v1/reports/revenue-overview
+   */
+  static getRevenueOverview = catchAsyncHandler(async (req, res) => {
+    const result = await ReportService.getRevenueOverview(req.query, req.user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  /**
+   * Get top performers report
+   * GET /api/v1/reports/top-performers
+   */
+  static getTopPerformersReport = catchAsyncHandler(async (req, res) => {
+    const result = await ReportService.getTopPerformersReport(
+      req.query,
+      req.user
+    );
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  /**
    * Export report
    * GET /api/v1/reports/export
    */

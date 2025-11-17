@@ -77,6 +77,20 @@ const VehicleSchema = new mongoose.Schema(
       default: "Owned",
       index: true,
     },
+    vehicleType: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+      default: null,
+      index: true,
+    },
+    depotId: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: null,
+      index: true,
+    },
     status: {
       type: String,
       enum: ["active", "inactive", "workshop", "hold"],
@@ -113,6 +127,8 @@ const VehicleSchema = new mongoose.Schema(
 VehicleSchema.index({ fleetNo: 1, organizationId: 1 });
 VehicleSchema.index({ registration: 1, organizationId: 1 });
 VehicleSchema.index({ organizationId: 1, status: 1 });
+VehicleSchema.index({ organizationId: 1, depotId: 1 });
+VehicleSchema.index({ organizationId: 1, vehicleType: 1 });
 
 module.exports = mongoose.model("Vehicle", VehicleSchema);
 

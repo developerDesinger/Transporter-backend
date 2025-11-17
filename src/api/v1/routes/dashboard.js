@@ -38,5 +38,29 @@ router.get(
   DashboardController.getActiveDrivers
 );
 
+/**
+ * @route   GET /api/v1/dashboard/active-jobs
+ * @desc    Get active jobs for dashboard widget
+ * @access  Authenticated (requires operations.dispatch.view permission)
+ */
+router.get(
+  "/active-jobs",
+  isAuthenticated,
+  requirePermission("operations.dispatch.view"),
+  DashboardController.getActiveJobs
+);
+
+/**
+ * @route   GET /api/v1/dashboard/activity
+ * @desc    Get recent dashboard activity
+ * @access  Authenticated (requires operations.dashboard.view permission)
+ */
+router.get(
+  "/activity",
+  isAuthenticated,
+  requirePermission("operations.dashboard.view"),
+  DashboardController.getRecentActivity
+);
+
 module.exports = router;
 
