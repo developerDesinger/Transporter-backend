@@ -363,9 +363,9 @@ class InvoiceService {
 
     // Filter by status
     if (query.status) {
-      if (!["DRAFT", "SENT", "PAID", "OVERDUE", "VOID"].includes(query.status)) {
+      if (!["DRAFT", "PENDING", "SENT", "PAID", "OVERDUE", "VOID"].includes(query.status)) {
         throw new AppError(
-          "Invalid status. Must be DRAFT, SENT, PAID, OVERDUE, or VOID",
+          "Invalid status. Must be DRAFT, PENDING, SENT, PAID, OVERDUE, or VOID",
           HttpStatusCodes.BAD_REQUEST
         );
       }
@@ -504,7 +504,7 @@ class InvoiceService {
 
     // Filter by status if provided
     if (query.status && query.status !== "all") {
-      const validStatuses = ["DRAFT", "SENT", "PARTIAL", "PAID", "OVERDUE", "VOID"];
+      const validStatuses = ["DRAFT", "PENDING", "SENT", "PARTIAL", "PAID", "OVERDUE", "VOID"];
       if (validStatuses.includes(query.status)) {
         filter.status = query.status;
       } else {
@@ -602,8 +602,8 @@ class InvoiceService {
           calculatedStatus = "PARTIAL";
         } else if (dueDate < today && balanceDue > 0) {
           calculatedStatus = "OVERDUE";
-        } else if (invoice.status === "DRAFT") {
-          calculatedStatus = "DRAFT";
+        } else if (invoice.status === "DRAFT" || invoice.status === "PENDING") {
+          calculatedStatus = invoice.status; // Keep DRAFT or PENDING as is
         } else {
           calculatedStatus = "SENT";
         }
@@ -1109,9 +1109,9 @@ class InvoiceService {
       } else if (newBalanceDue < invoiceTotal && newBalanceDue > 0) {
         // Partially paid
         newStatus = "PARTIAL";
-      } else if (invoice.status === "DRAFT" && newBalanceDue === invoiceTotal) {
-        // No payment applied (edge case), set to SENT
-        newStatus = "SENT";
+      } else if ((invoice.status === "DRAFT" || invoice.status === "PENDING") && newBalanceDue === invoiceTotal) {
+        // No payment applied (edge case), keep current status (DRAFT or PENDING)
+        newStatus = invoice.status;
       }
       // Otherwise, keep current status
 
@@ -1349,6 +1349,870 @@ class InvoiceService {
         total: total,
         totalPages: Math.ceil(total / limitNum),
       },
+    };
+  }
+
+  /**
+   * Get invoice groups with their associated jobs
+   * @param {Object} query - Query parameters (customerId, grouping)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of invoice groups with jobs
+   */
+  static async getInvoiceGroups(query, user) {
+    const InvoiceGroup = require("../models/invoiceGroup.model");
+    const InvoiceGroupJob = require("../models/invoiceGroupJob.model");
+    const Customer = require("../models/customer.model");
+    const Party = require("../models/party.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validation
+    if (!query.grouping || !["DAY", "WEEK", "PO"].includes(query.grouping)) {
+      throw new AppError("Invalid grouping method. Must be DAY, WEEK, or PO", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Build filter
+    const filter = {
+      grouping: query.grouping,
+    };
+
+    if (organizationId) {
+      filter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      filter.organizationId = null;
+    }
+
+    if (query.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(query.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+      filter.customerId = new mongoose.Types.ObjectId(query.customerId);
+    }
+
+    // Fetch groups
+    const groups = await InvoiceGroup.find(filter)
+      .populate({
+        path: "customerId",
+        populate: {
+          path: "partyId",
+          select: "companyName",
+        },
+      })
+      .sort({ periodStart: -1, createdAt: -1 })
+      .lean();
+
+    // Fetch jobs for each group
+    const groupsWithJobs = await Promise.all(
+      groups.map(async (group) => {
+        const groupJobs = await InvoiceGroupJob.find({
+          invoiceGroupId: group._id,
+        })
+          .populate({
+            path: "jobId",
+            populate: {
+              path: "customerId",
+              populate: {
+                path: "partyId",
+                select: "companyName",
+              },
+            },
+          })
+          .lean();
+
+        const jobs = groupJobs
+          .filter((gj) => gj.jobId)
+          .map((gj) => {
+            const job = gj.jobId;
+            const customer = job.customerId;
+            return {
+              id: job._id.toString(),
+              jobNo: job.jobNumber,
+              customerId: customer ? customer._id.toString() : null,
+              customer: customer
+                ? {
+                    id: customer._id.toString(),
+                    party: customer.partyId
+                      ? {
+                          companyName: customer.partyId.companyName || null,
+                        }
+                      : null,
+                  }
+                : null,
+              date: job.date ? new Date(job.date + "T00:00:00.000Z").toISOString() : null,
+              description: job.notes || "Delivery service",
+              chargeAmount: parseFloat(job.customerCharge || 0),
+              status: job.status === "CLOSED" ? "LOCKED" : job.status,
+            };
+          });
+
+        return {
+          id: group._id.toString(),
+          customerId: group.customerId ? group.customerId._id.toString() : null,
+          customer: group.customerId
+            ? {
+                id: group.customerId._id.toString(),
+                party: group.customerId.partyId
+                  ? {
+                      companyName: group.customerId.partyId.companyName || null,
+                    }
+                  : null,
+              }
+            : null,
+          periodStart: group.periodStart.toISOString(),
+          periodEnd: group.periodEnd.toISOString(),
+          grouping: group.grouping,
+          status: group.status,
+          jobs,
+          createdAt: group.createdAt.toISOString(),
+          updatedAt: group.updatedAt.toISOString(),
+        };
+      })
+    );
+
+    return groupsWithJobs;
+  }
+
+  /**
+   * Get available jobs that can be added to invoice groups
+   * @param {Object} query - Query parameters (customerId)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of available jobs
+   */
+  static async getAvailableJobs(query, user) {
+    const InvoiceGroupJob = require("../models/invoiceGroupJob.model");
+    const InvoiceLineItem = require("../models/invoiceLineItem.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build filter for jobs
+    const jobFilter = {
+      status: { $in: ["CLOSED"] }, // Only closed jobs are available
+    };
+
+    if (organizationId) {
+      jobFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      jobFilter.organizationId = null;
+    }
+
+    if (query.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(query.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+      jobFilter.customerId = new mongoose.Types.ObjectId(query.customerId);
+    }
+
+    // Fetch all closed jobs
+    const allJobs = await Job.find(jobFilter)
+      .populate({
+        path: "customerId",
+        populate: {
+          path: "partyId",
+          select: "companyName",
+        },
+      })
+      .lean();
+
+    // Get job IDs that are already in groups
+    const groupedJobIds = await InvoiceGroupJob.distinct("jobId");
+
+    // Get job IDs that are already invoiced
+    const invoicedJobIds = await InvoiceLineItem.distinct("jobId", {
+      jobId: { $ne: null },
+    });
+
+    // Filter out jobs that are already grouped or invoiced
+    const availableJobs = allJobs
+      .filter((job) => {
+        const jobIdStr = job._id.toString();
+        return (
+          !groupedJobIds.some((id) => id.toString() === jobIdStr) &&
+          !invoicedJobIds.some((id) => id.toString() === jobIdStr)
+        );
+      })
+      .map((job) => {
+        const customer = job.customerId;
+        return {
+          id: job._id.toString(),
+          jobNo: job.jobNumber,
+          customerId: customer ? customer._id.toString() : null,
+          customer: customer
+            ? {
+                id: customer._id.toString(),
+                party: customer.partyId
+                  ? {
+                      companyName: customer.partyId.companyName || null,
+                    }
+                  : null,
+              }
+            : null,
+          date: job.date ? new Date(job.date + "T00:00:00.000Z").toISOString() : null,
+          description: job.notes || "Delivery service",
+          chargeAmount: parseFloat(job.customerCharge || 0),
+          status: job.status === "CLOSED" ? "LOCKED" : job.status,
+        };
+      });
+
+    return availableJobs;
+  }
+
+  /**
+   * Group available jobs into invoice groups
+   * @param {Object} data - Request data (customerId, grouping)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Summary of groups created
+   */
+  static async groupJobs(data, user) {
+    const InvoiceGroup = require("../models/invoiceGroup.model");
+    const InvoiceGroupJob = require("../models/invoiceGroupJob.model");
+    const InvoiceLineItem = require("../models/invoiceLineItem.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validation
+    if (!data.grouping || !["DAY", "WEEK", "PO"].includes(data.grouping)) {
+      throw new AppError("Invalid grouping method. Must be DAY, WEEK, or PO", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Build filter for available jobs
+    const jobFilter = {
+      status: "CLOSED",
+    };
+
+    if (organizationId) {
+      jobFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      jobFilter.organizationId = null;
+    }
+
+    if (data.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(data.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+      jobFilter.customerId = new mongoose.Types.ObjectId(data.customerId);
+    }
+
+    // Fetch all closed jobs
+    const allJobs = await Job.find(jobFilter).lean();
+
+    // Get job IDs that are already in groups
+    const groupedJobIds = await InvoiceGroupJob.distinct("jobId");
+
+    // Get job IDs that are already invoiced
+    const invoicedJobIds = await InvoiceLineItem.distinct("jobId", {
+      jobId: { $ne: null },
+    });
+
+    // Filter available jobs
+    const availableJobs = allJobs.filter((job) => {
+      const jobIdStr = job._id.toString();
+      return (
+        !groupedJobIds.some((id) => id.toString() === jobIdStr) &&
+        !invoicedJobIds.some((id) => id.toString() === jobIdStr)
+      );
+    });
+
+    if (availableJobs.length === 0) {
+      return {
+        groupsCreated: 0,
+        jobsGrouped: 0,
+      };
+    }
+
+    // Group jobs by customer and grouping method
+    const groupedJobs = {};
+    const session = await mongoose.startSession();
+    let transactionStarted = false;
+
+    try {
+      session.startTransaction();
+      transactionStarted = true;
+
+      for (const job of availableJobs) {
+        const customerId = job.customerId.toString();
+        let groupKey;
+
+        if (data.grouping === "DAY") {
+          // Group by customer + date
+          const dateStr = job.date;
+          groupKey = `${customerId}-${dateStr}`;
+
+          if (!groupedJobs[groupKey]) {
+            const dateObj = new Date(dateStr + "T00:00:00.000Z");
+            const periodStart = new Date(dateObj);
+            periodStart.setHours(0, 0, 0, 0);
+            const periodEnd = new Date(dateObj);
+            periodEnd.setHours(23, 59, 59, 999);
+            groupedJobs[groupKey] = {
+              customerId: new mongoose.Types.ObjectId(customerId),
+              periodStart,
+              periodEnd,
+              grouping: "DAY",
+              jobs: [],
+            };
+          }
+        } else if (data.grouping === "WEEK") {
+          // Group by customer + week (Monday to Sunday)
+          const dateObj = new Date(job.date + "T00:00:00.000Z");
+          const dayOfWeek = dateObj.getDay();
+          const monday = new Date(dateObj);
+          monday.setDate(dateObj.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+          monday.setHours(0, 0, 0, 0);
+          const sunday = new Date(monday);
+          sunday.setDate(monday.getDate() + 6);
+          sunday.setHours(23, 59, 59, 999);
+
+          groupKey = `${customerId}-${monday.toISOString().split("T")[0]}`;
+
+          if (!groupedJobs[groupKey]) {
+            groupedJobs[groupKey] = {
+              customerId: new mongoose.Types.ObjectId(customerId),
+              periodStart: monday,
+              periodEnd: sunday,
+              grouping: "WEEK",
+              jobs: [],
+            };
+          }
+        } else if (data.grouping === "PO") {
+          // Group by customer + purchase order
+          // Note: Job model doesn't have purchaseOrderNumber, so we'll use a placeholder
+          // In a real implementation, you might extract PO from job notes or add a PO field
+          const po = job.notes?.match(/PO[:\s]+([A-Z0-9-]+)/i)?.[1] || "NO-PO";
+          groupKey = `${customerId}-${po}`;
+
+          if (!groupedJobs[groupKey]) {
+            // For PO grouping, find min/max dates from jobs
+            groupedJobs[groupKey] = {
+              customerId: new mongoose.Types.ObjectId(customerId),
+              periodStart: null,
+              periodEnd: null,
+              grouping: "PO",
+              purchaseOrderNumber: po,
+              jobs: [],
+            };
+          }
+        }
+
+        groupedJobs[groupKey].jobs.push(job);
+      }
+
+      // For PO groups, calculate periodStart and periodEnd from job dates
+      for (const groupKey in groupedJobs) {
+        const group = groupedJobs[groupKey];
+        if (group.grouping === "PO" && group.jobs.length > 0) {
+          const dates = group.jobs.map((j) => new Date(j.date + "T00:00:00.000Z"));
+          group.periodStart = new Date(Math.min(...dates));
+          group.periodStart.setHours(0, 0, 0, 0);
+          group.periodEnd = new Date(Math.max(...dates));
+          group.periodEnd.setHours(23, 59, 59, 999);
+        }
+      }
+
+      // Create groups and link jobs
+      let groupsCreated = 0;
+      let jobsGrouped = 0;
+
+      for (const groupKey in groupedJobs) {
+        const groupData = groupedJobs[groupKey];
+        if (groupData.jobs.length === 0) continue;
+
+        // Check if group already exists
+        const existingGroup = await InvoiceGroup.findOne({
+          organizationId: organizationId ? new mongoose.Types.ObjectId(organizationId) : null,
+          customerId: groupData.customerId,
+          grouping: groupData.grouping,
+          periodStart: groupData.periodStart,
+          periodEnd: groupData.periodEnd,
+          ...(groupData.purchaseOrderNumber ? { purchaseOrderNumber: groupData.purchaseOrderNumber } : {}),
+        }).session(session);
+
+        let group;
+        if (existingGroup) {
+          group = existingGroup;
+        } else {
+          group = await InvoiceGroup.create(
+            [
+              {
+                organizationId: organizationId ? new mongoose.Types.ObjectId(organizationId) : null,
+                customerId: groupData.customerId,
+                periodStart: groupData.periodStart,
+                periodEnd: groupData.periodEnd,
+                grouping: groupData.grouping,
+                status: "DRAFT",
+                purchaseOrderNumber: groupData.purchaseOrderNumber || null,
+              },
+            ],
+            { session }
+          );
+          group = group[0];
+          groupsCreated++;
+        }
+
+        // Link jobs to group
+        for (const job of groupData.jobs) {
+          const existingLink = await InvoiceGroupJob.findOne({
+            invoiceGroupId: group._id,
+            jobId: job._id,
+          }).session(session);
+
+          if (!existingLink) {
+            await InvoiceGroupJob.create(
+              [
+                {
+                  invoiceGroupId: group._id,
+                  jobId: job._id,
+                },
+              ],
+              { session }
+            );
+            jobsGrouped++;
+          }
+        }
+      }
+
+      await session.commitTransaction();
+      await session.endSession();
+
+      return {
+        groupsCreated,
+        jobsGrouped,
+      };
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await session.abortTransaction();
+        } catch (abortError) {
+          console.warn("Transaction already aborted:", abortError.message);
+        }
+      }
+      try {
+        await session.endSession();
+      } catch (endError) {
+        console.warn("Session already ended:", endError.message);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Remove a job from an invoice group
+   * @param {string} groupId - Invoice group ID
+   * @param {string} jobId - Job ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Success message
+   */
+  static async removeJobFromGroup(groupId, jobId, user) {
+    const InvoiceGroup = require("../models/invoiceGroup.model");
+    const InvoiceGroupJob = require("../models/invoiceGroupJob.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validation
+    if (!mongoose.Types.ObjectId.isValid(groupId)) {
+      throw new AppError("Invalid group ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      throw new AppError("Invalid job ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find group and verify ownership
+    const groupFilter = {
+      _id: new mongoose.Types.ObjectId(groupId),
+    };
+
+    if (organizationId) {
+      groupFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      groupFilter.organizationId = null;
+    }
+
+    const group = await InvoiceGroup.findOne(groupFilter);
+
+    if (!group) {
+      throw new AppError("Group not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify group status
+    if (group.status === "READY") {
+      throw new AppError("Cannot remove job from ready group", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find and remove job link
+    const jobLink = await InvoiceGroupJob.findOne({
+      invoiceGroupId: group._id,
+      jobId: new mongoose.Types.ObjectId(jobId),
+    });
+
+    if (!jobLink) {
+      throw new AppError("Job not found in group", HttpStatusCodes.NOT_FOUND);
+    }
+
+    await InvoiceGroupJob.deleteOne({ _id: jobLink._id });
+
+    // Optionally delete group if empty
+    const remainingJobs = await InvoiceGroupJob.countDocuments({
+      invoiceGroupId: group._id,
+    });
+
+    if (remainingJobs === 0) {
+      await InvoiceGroup.deleteOne({ _id: group._id });
+    }
+
+    return {
+      message: "Job removed from group",
+    };
+  }
+
+  /**
+   * Mark an invoice group as ready
+   * @param {string} groupId - Invoice group ID
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Updated group
+   */
+  static async markGroupAsReady(groupId, user) {
+    const InvoiceGroup = require("../models/invoiceGroup.model");
+    const InvoiceGroupJob = require("../models/invoiceGroupJob.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validation
+    if (!mongoose.Types.ObjectId.isValid(groupId)) {
+      throw new AppError("Invalid group ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Find group and verify ownership
+    const groupFilter = {
+      _id: new mongoose.Types.ObjectId(groupId),
+    };
+
+    if (organizationId) {
+      groupFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      groupFilter.organizationId = null;
+    }
+
+    const group = await InvoiceGroup.findOne(groupFilter);
+
+    if (!group) {
+      throw new AppError("Group not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Verify group has at least one job
+    const jobCount = await InvoiceGroupJob.countDocuments({
+      invoiceGroupId: group._id,
+    });
+
+    if (jobCount === 0) {
+      throw new AppError("Group must have at least one job", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    // Update status
+    group.status = "READY";
+    await group.save();
+
+    return {
+      id: group._id.toString(),
+      status: group.status,
+    };
+  }
+
+  /**
+   * Create invoices from ready invoice groups
+   * @param {Object} data - Request data (grouping, customerId)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Summary of invoices created
+   */
+  static async createInvoicesFromGroups(data, user) {
+    const InvoiceGroup = require("../models/invoiceGroup.model");
+    const InvoiceGroupJob = require("../models/invoiceGroupJob.model");
+    const Customer = require("../models/customer.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build filter for ready groups
+    const groupFilter = {
+      status: "READY",
+    };
+
+    if (organizationId) {
+      groupFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      groupFilter.organizationId = null;
+    }
+
+    if (data.grouping) {
+      if (!["DAY", "WEEK", "PO"].includes(data.grouping)) {
+        throw new AppError("Invalid grouping method. Must be DAY, WEEK, or PO", HttpStatusCodes.BAD_REQUEST);
+      }
+      groupFilter.grouping = data.grouping;
+    }
+
+    if (data.customerId) {
+      if (!mongoose.Types.ObjectId.isValid(data.customerId)) {
+        throw new AppError("Invalid customer ID", HttpStatusCodes.BAD_REQUEST);
+      }
+      groupFilter.customerId = new mongoose.Types.ObjectId(data.customerId);
+    }
+
+    // Fetch ready groups
+    const readyGroups = await InvoiceGroup.find(groupFilter)
+      .populate("customerId")
+      .lean();
+
+    if (readyGroups.length === 0) {
+      throw new AppError("No ready groups found", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const session = await mongoose.startSession();
+    let transactionStarted = false;
+    const createdInvoiceIds = [];
+
+    try {
+      session.startTransaction();
+      transactionStarted = true;
+
+      for (const group of readyGroups) {
+        // Get jobs in group
+        const groupJobs = await InvoiceGroupJob.find({
+          invoiceGroupId: group._id,
+        })
+          .populate("jobId")
+          .session(session)
+          .lean();
+
+        if (groupJobs.length === 0) continue;
+
+        const jobs = groupJobs.map((gj) => gj.jobId).filter(Boolean);
+
+        // Get customer
+        const customer = await Customer.findById(group.customerId).session(session).lean();
+
+        if (!customer) continue;
+
+        // Calculate totals
+        let totalExGst = 0;
+        for (const job of jobs) {
+          totalExGst += parseFloat(job.customerCharge || 0);
+        }
+
+        const gst = totalExGst * 0.1; // 10% GST
+        const totalIncGst = totalExGst + gst;
+
+        // Generate invoice number
+        const currentYear = new Date().getFullYear();
+        const invoiceNo = await this.generateInvoiceNumber(customer, currentYear);
+
+        // Set dates
+        const issueDate = new Date();
+        const paymentTerms = customer.termsDays || 14;
+        const dueDate = new Date(issueDate);
+        dueDate.setDate(dueDate.getDate() + paymentTerms);
+
+        // Create invoice
+        const invoice = await Invoice.create(
+          [
+            {
+              invoiceNo,
+              customerId: customer._id,
+              issueDate,
+              dueDate,
+              status: "PENDING", // Ready to be sent
+              totalExGst,
+              gst,
+              totalIncGst,
+              balanceDue: totalIncGst,
+              grouping: group.grouping,
+              purchaseOrderNumber: group.purchaseOrderNumber || null,
+              organizationId: organizationId ? new mongoose.Types.ObjectId(organizationId) : null,
+            },
+          ],
+          { session }
+        );
+
+        const createdInvoice = invoice[0];
+        createdInvoiceIds.push(createdInvoice._id.toString());
+
+        // Create line items
+        for (const job of jobs) {
+          await InvoiceLineItem.create(
+            [
+              {
+                invoiceId: createdInvoice._id,
+                jobId: job._id,
+                allocatorRowId: job.allocatorRowId || null,
+                date: job.date,
+                jobNumber: job.jobNumber || `JOB-${job._id}`,
+                description: job.notes || "Delivery service",
+                quantity: 1,
+                unitPrice: parseFloat(job.customerCharge || 0),
+                total: parseFloat(job.customerCharge || 0),
+              },
+            ],
+            { session }
+          );
+        }
+
+        // Mark group as processed (delete it or add a status field)
+        await InvoiceGroup.deleteOne({ _id: group._id }).session(session);
+      }
+
+      await session.commitTransaction();
+      await session.endSession();
+
+      return {
+        invoicesCreated: createdInvoiceIds.length,
+        invoiceIds: createdInvoiceIds,
+      };
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await session.abortTransaction();
+        } catch (abortError) {
+          console.warn("Transaction already aborted:", abortError.message);
+        }
+      }
+      try {
+        await session.endSession();
+      } catch (endError) {
+        console.warn("Session already ended:", endError.message);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Create a manual invoice (not from jobs)
+   * @param {Object} data - Request data (customerId, paymentTerms, lineItems, notes, status)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Created invoice
+   */
+  static async createManualInvoice(data, user) {
+    const Customer = require("../models/customer.model");
+
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validation
+    const errors = [];
+
+    if (!data.customerId) {
+      errors.push({ field: "customerId", message: "Customer ID is required" });
+    }
+
+    if (!data.lineItems || !Array.isArray(data.lineItems) || data.lineItems.length === 0) {
+      errors.push({ field: "lineItems", message: "At least one line item is required" });
+    }
+
+    if (data.lineItems && Array.isArray(data.lineItems)) {
+      data.lineItems.forEach((line, index) => {
+        if (!line.description || line.description.trim() === "") {
+          errors.push({ field: `lineItems[${index}].description`, message: "Description is required" });
+        }
+        if (!line.quantity || parseFloat(line.quantity) <= 0) {
+          errors.push({ field: `lineItems[${index}].quantity`, message: "Quantity must be greater than 0" });
+        }
+        if (line.unitPrice === undefined || line.unitPrice === null || parseFloat(line.unitPrice) < 0) {
+          errors.push({ field: `lineItems[${index}].unitPrice`, message: "Unit price must be 0 or greater" });
+        }
+      });
+    }
+
+    if (!data.status || !["DRAFT", "PENDING", "SENT"].includes(data.status)) {
+      errors.push({ field: "status", message: "Status must be DRAFT, PENDING, or SENT" });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Validation failed", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Verify customer exists
+    const customerFilter = {
+      _id: new mongoose.Types.ObjectId(data.customerId),
+    };
+
+    if (organizationId) {
+      customerFilter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      customerFilter.organizationId = null;
+    }
+
+    const customer = await Customer.findOne(customerFilter).lean();
+
+    if (!customer) {
+      throw new AppError("Customer not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    // Calculate totals
+    let totalExGst = 0;
+    for (const line of data.lineItems) {
+      totalExGst += parseFloat(line.quantity || 0) * parseFloat(line.unitPrice || 0);
+    }
+
+    const gst = totalExGst * 0.1; // 10% GST
+    const totalIncGst = totalExGst + gst;
+
+    // Generate invoice number
+    const currentYear = new Date().getFullYear();
+    const invoiceNo = await this.generateInvoiceNumber(customer, currentYear);
+
+    // Set dates
+    const issueDate = new Date();
+    let dueDate = new Date(issueDate);
+
+    if (data.paymentTerms) {
+      const termsMap = {
+        NET_7: 7,
+        NET_14: 14,
+        NET_30: 30,
+        NET_60: 60,
+        DUE_ON_RECEIPT: 0,
+      };
+      const days = termsMap[data.paymentTerms] || customer.termsDays || 14;
+      dueDate.setDate(dueDate.getDate() + days);
+    } else {
+      dueDate.setDate(dueDate.getDate() + (customer.termsDays || 14));
+    }
+
+    // Create invoice
+    const invoice = await Invoice.create({
+      invoiceNo,
+      customerId: customer._id,
+      issueDate,
+      dueDate,
+      status: data.status,
+      totalExGst,
+      gst,
+      totalIncGst,
+      balanceDue: totalIncGst,
+      grouping: "DAY", // Default for manual invoices
+      organizationId: organizationId ? new mongoose.Types.ObjectId(organizationId) : null,
+    });
+
+    // Create line items
+    for (const line of data.lineItems) {
+      await InvoiceLineItem.create({
+        invoiceId: invoice._id,
+        description: line.description.trim(),
+        quantity: parseFloat(line.quantity),
+        unitPrice: parseFloat(line.unitPrice),
+        total: parseFloat(line.quantity) * parseFloat(line.unitPrice),
+        date: issueDate.toISOString().split("T")[0],
+      });
+    }
+
+    return {
+      id: invoice._id.toString(),
+      invoiceNo: invoice.invoiceNo,
+      customerId: invoice.customerId.toString(),
+      issueDate: invoice.issueDate.toISOString(),
+      dueDate: invoice.dueDate.toISOString(),
+      status: invoice.status,
+      totalExGst: invoice.totalExGst,
+      gst: invoice.gst,
+      totalIncGst: invoice.totalIncGst,
+      balanceDue: invoice.balanceDue,
     };
   }
 }
