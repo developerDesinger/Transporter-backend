@@ -41,6 +41,7 @@ const fleetRoutes = require("./src/api/v1/routes/fleet");
 const scheduleRoutes = require("./src/api/v1/routes/schedule");
 const complianceRoutes = require("./src/api/v1/routes/compliance");
 const planningRoutes = require("./src/api/v1/routes/planning");
+const invoiceDeliveryRoutes = require("./src/api/v1/routes/invoiceDelivery");
 
 const app = express();
 //const admin = require("firebase-admin");
@@ -304,6 +305,7 @@ app.use("/api/v1/reports", reportsRoutes);
 app.use("/api/v1/fleet", fleetRoutes);
 app.use("/api/v1/schedule", scheduleRoutes);
 app.use("/api/v1/compliance", complianceRoutes);
+app.use("/api/v1/invoice-delivery", invoiceDeliveryRoutes);
 app.use("/api/v1", planningRoutes);
 const jobsRoutes = require("./src/api/v1/routes/jobs");
 app.use("/api/v1/jobs", jobsRoutes);

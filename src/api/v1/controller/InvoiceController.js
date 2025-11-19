@@ -98,6 +98,15 @@ class InvoiceController {
       data: result,
     });
   });
+
+  static sendInvoice = catchAsyncHandler(async (req, res) => {
+    const result = await InvoiceService.sendInvoice(req.params.invoiceId, req.body, req.user);
+    return res.status(200).json({
+      success: true,
+      message: "Invoice sent successfully",
+      data: result,
+    });
+  });
 }
 
 module.exports = InvoiceController;

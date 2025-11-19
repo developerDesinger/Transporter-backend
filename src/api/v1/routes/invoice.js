@@ -71,5 +71,12 @@ router.post(
   InvoiceController.createManualInvoice
 );
 
+// POST /api/v1/invoices/:invoiceId/send - Send invoice email
+router.post(
+  "/:invoiceId/send",
+  requirePermission("financials.invoicing.send"),
+  InvoiceController.sendInvoice
+);
+
 module.exports = router;
 

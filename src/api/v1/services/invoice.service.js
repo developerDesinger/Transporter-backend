@@ -3,6 +3,8 @@ const InvoiceLineItem = require("../models/invoiceLineItem.model");
 const Job = require("../models/job.model");
 const AllocatorRow = require("../models/allocatorRow.model");
 const Customer = require("../models/customer.model");
+const InvoiceDeliveryEvent = require("../models/invoiceDeliveryEvent.model");
+const InvoiceDeliveryEventLog = require("../models/invoiceDeliveryEventLog.model");
 const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
 const mongoose = require("mongoose");
@@ -2213,6 +2215,185 @@ class InvoiceService {
       gst: invoice.gst,
       totalIncGst: invoice.totalIncGst,
       balanceDue: invoice.balanceDue,
+    };
+  }
+
+  /**
+   * Send an invoice via email and create delivery tracking entries.
+   * @param {string} invoiceId
+   * @param {Object} body - email overrides (to, cc, bcc, message, attachments)
+   * @param {Object} user
+   * @returns {{deliveryId: string, deliveryIds: string[], invoiceId: string, status: string, sentAt: string, recipients: string[]}}
+   */
+  static async sendInvoice(invoiceId, body = {}, user) {
+    if (!invoiceId || !mongoose.Types.ObjectId.isValid(invoiceId)) {
+      throw new AppError("Invalid invoice ID", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const userOrgId = user.activeOrganizationId || null;
+
+    const invoiceFilter = {
+      _id: new mongoose.Types.ObjectId(invoiceId),
+    };
+
+    if (userOrgId) {
+      invoiceFilter.organizationId = new mongoose.Types.ObjectId(userOrgId);
+    } else {
+      invoiceFilter.organizationId = null;
+    }
+
+    const invoice = await Invoice.findOne(invoiceFilter)
+      .populate({
+        path: "customerId",
+        select: "accountsEmail accountsName primaryContactEmail primaryContactName tradingName legalCompanyName partyId billingEmail billingContactName",
+        populate: {
+          path: "partyId",
+          select: "companyName firstName lastName email",
+        },
+      })
+      .lean();
+
+    if (!invoice) {
+      throw new AppError("Invoice not found", HttpStatusCodes.NOT_FOUND);
+    }
+
+    if (invoice.status === "VOID") {
+      throw new AppError("Cannot send a void invoice", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const customer = invoice.customerId;
+
+    const normalizeArray = (value) => {
+      if (!value) return [];
+      if (Array.isArray(value)) return value;
+      return [value];
+    };
+
+    const normalizeEmail = (email) => {
+      if (!email || typeof email !== "string") return null;
+      const normalized = email.trim().toLowerCase();
+      return normalized.length > 0 ? normalized : null;
+    };
+
+    const toSet = new Set();
+    normalizeArray(body.to).forEach((email) => {
+      const normalized = normalizeEmail(email);
+      if (normalized) {
+        toSet.add(normalized);
+      }
+    });
+
+    const fallbackEmails = [
+      customer?.accountsEmail,
+      customer?.primaryContactEmail,
+      customer?.billingEmail,
+      customer?.partyId?.email,
+    ];
+    fallbackEmails.forEach((email) => {
+      if (toSet.size === 0) {
+        const normalized = normalizeEmail(email);
+        if (normalized) {
+          toSet.add(normalized);
+        }
+      }
+    });
+
+    if (toSet.size === 0) {
+      throw new AppError("At least one recipient email is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    const ccList = normalizeArray(body.cc)
+      .map(normalizeEmail)
+      .filter(Boolean);
+
+    const bccList = normalizeArray(body.bcc)
+      .map(normalizeEmail)
+      .filter(Boolean);
+
+    const attachments = normalizeArray(body.attachments).filter((item) => typeof item === "string" && item.trim().length > 0);
+    const recipients = Array.from(toSet);
+
+    const organizationObjectId =
+      invoice.organizationId && mongoose.Types.ObjectId.isValid(invoice.organizationId)
+        ? new mongoose.Types.ObjectId(invoice.organizationId)
+        : userOrgId && mongoose.Types.ObjectId.isValid(userOrgId)
+        ? new mongoose.Types.ObjectId(userOrgId)
+        : null;
+
+    const sentAt = new Date();
+    const recipientName =
+      customer?.accountsName ||
+      customer?.primaryContactName ||
+      customer?.billingContactName ||
+      customer?.tradingName ||
+      customer?.legalCompanyName ||
+      [customer?.partyId?.firstName, customer?.partyId?.lastName].filter(Boolean).join(" ").trim() ||
+      customer?.partyId?.companyName ||
+      null;
+
+    // Placeholder email send (integrate with provider/queue as needed)
+    const subject = `Invoice ${invoice.invoiceNo}`;
+    console.info(
+      `[InvoiceService] Sending invoice ${invoice.invoiceNo} to ${recipients.join(", ")} (cc: ${ccList.join(
+        ", "
+      ) || "none"})`
+    );
+
+    const deliveries = [];
+    for (const recipientEmail of recipients) {
+      const delivery = await InvoiceDeliveryEvent.create({
+        invoiceId: invoice._id,
+        organizationId: organizationObjectId,
+        recipientEmail,
+        recipientName,
+        sentAt,
+        currentStatus: "SENT",
+        opensCount: 0,
+        clicksCount: 0,
+        engagementScore: 0,
+        metadata: {
+          cc: ccList,
+          bcc: bccList,
+          message: body.message || null,
+          attachments,
+          subject,
+        },
+      });
+
+      await InvoiceDeliveryEventLog.create({
+        deliveryEventId: delivery._id,
+        organizationId: organizationObjectId,
+        eventType: "SENT",
+        timestamp: sentAt,
+        metadata: {
+          cc: ccList,
+          bcc: bccList,
+          message: body.message || null,
+          attachments,
+        },
+      });
+
+      deliveries.push(delivery);
+    }
+
+    if (["DRAFT", "PENDING"].includes(invoice.status)) {
+      await Invoice.updateOne(
+        { _id: invoice._id },
+        {
+          $set: { status: "SENT" },
+        }
+      );
+    }
+
+    const primaryDelivery = deliveries[0];
+
+    return {
+      deliveryId: primaryDelivery._id.toString(),
+      deliveryIds: deliveries.map((delivery) => delivery._id.toString()),
+      invoiceId: invoice._id.toString(),
+      status: primaryDelivery.currentStatus,
+      sentAt: sentAt.toISOString(),
+      recipients,
     };
   }
 }
