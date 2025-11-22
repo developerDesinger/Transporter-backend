@@ -72,6 +72,272 @@ class BroadcastService {
   }
 
   /**
+   * Get drivers for broadcast with filtering and search
+   * @param {Object} query - Query parameters (search, employmentType, state, suburb, vehicleType, fleetOwner, compliance)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of driver objects formatted for broadcast
+   */
+  static async getDriversForBroadcast(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build match conditions - ensure we only get drivers (not customers)
+    const matchConditions = [];
+
+    // Base condition: active drivers only
+    // Ensure we're querying the Driver collection and only getting actual drivers
+    matchConditions.push({
+      $or: [
+        { isActive: true },
+        { isActive: { $exists: false } },
+        { isActive: null },
+      ],
+    });
+
+    // Ensure we have a partyId (required for drivers)
+    matchConditions.push({
+      partyId: { $exists: true, $ne: null },
+    });
+
+    // Ensure this is actually a driver record (has driver-specific fields)
+    // Drivers have driverCode, employmentType, or vehicleTypesInFleet
+    // Customers don't have these fields
+    matchConditions.push({
+      $or: [
+        { driverCode: { $exists: true, $ne: null } },
+        { employmentType: { $exists: true } },
+        { vehicleTypesInFleet: { $exists: true, $ne: [] } },
+        { servicesProvided: { $exists: true } },
+      ],
+    });
+
+    // Build aggregation pipeline
+    const pipeline = [];
+
+    // Match stage - only drivers
+    pipeline.push({
+      $match: matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0],
+    });
+
+    // Lookup party
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    pipeline.push({ $unwind: { path: "$party", preserveNullAndEmptyArrays: true } });
+
+    // Add filters
+    if (query.search) {
+      const searchRegex = new RegExp(query.search.trim(), "i");
+      pipeline.push({
+        $match: {
+          $or: [
+            { driverCode: searchRegex },
+            { "party.firstName": searchRegex },
+            { "party.lastName": searchRegex },
+            { "party.email": searchRegex },
+            { "party.phone": searchRegex },
+            { "party.phoneAlt": searchRegex },
+            { "party.suburb": searchRegex },
+            { "party.state": searchRegex },
+            { "party.stateRegion": searchRegex },
+          ],
+        },
+      });
+    }
+
+    if (query.employmentType && query.employmentType !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { employmentType: query.employmentType.toUpperCase() },
+            { contactType: query.employmentType },
+          ],
+        },
+      });
+    }
+
+    if (query.state && query.state !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { "party.state": query.state },
+            { "party.stateRegion": query.state },
+          ],
+        },
+      });
+    }
+
+    if (query.suburb && query.suburb !== "all") {
+      pipeline.push({
+        $match: {
+          "party.suburb": new RegExp(query.suburb.trim(), "i"),
+        },
+      });
+    }
+
+    if (query.vehicleType && query.vehicleType !== "all") {
+      pipeline.push({
+        $match: {
+          vehicleTypesInFleet: { $in: [query.vehicleType] },
+        },
+      });
+    }
+
+    if (query.fleetOwner && query.fleetOwner !== "all") {
+      // Note: Fleet owner might be stored differently, adjust based on your schema
+      pipeline.push({
+        $match: {
+          $or: [
+            { "party.companyName": new RegExp(query.fleetOwner.trim(), "i") },
+          ],
+        },
+      });
+    }
+
+    if (query.compliance && query.compliance !== "all") {
+      if (query.compliance === "compliant") {
+        pipeline.push({
+          $match: {
+            complianceStatus: "COMPLIANT",
+          },
+        });
+      } else if (query.compliance === "non-compliant") {
+        pipeline.push({
+          $match: {
+            $or: [
+              { complianceStatus: { $ne: "COMPLIANT" } },
+              { complianceStatus: null },
+            ],
+          },
+        });
+      }
+    }
+
+    // Project fields
+    pipeline.push({
+      $project: {
+        id: { $toString: "$_id" },
+        driverNumber: "$driverCode",
+        code: "$driverCode",
+        firstName: "$party.firstName",
+        lastName: "$party.lastName",
+        name: {
+          $concat: [
+            { $ifNull: ["$party.firstName", ""] },
+            " ",
+            { $ifNull: ["$party.lastName", ""] },
+          ],
+        },
+        type: {
+          $cond: {
+            if: { $eq: ["$employmentType", "EMPLOYEE"] },
+            then: "Employee",
+            else: {
+              $cond: {
+                if: { $eq: ["$employmentType", "CONTRACTOR"] },
+                then: "Contractor",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$contactType", "Fleet"] },
+                    then: "Fleet",
+                    else: "Employee",
+                  },
+                },
+              },
+            },
+          },
+        },
+        employmentType: {
+          $cond: {
+            if: { $eq: ["$employmentType", "EMPLOYEE"] },
+            then: "Employee",
+            else: {
+              $cond: {
+                if: { $eq: ["$employmentType", "CONTRACTOR"] },
+                then: "Contractor",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$contactType", "Fleet"] },
+                    then: "Fleet",
+                    else: "Employee",
+                  },
+                },
+              },
+            },
+          },
+        },
+        vehicleType: { $arrayElemAt: ["$vehicleTypesInFleet", 0] },
+        vehicle: { $arrayElemAt: ["$vehicleTypesInFleet", 0] },
+        suburb: "$party.suburb",
+        state: { $ifNull: ["$party.stateRegion", "$party.state"] },
+        stateRegion: { $ifNull: ["$party.stateRegion", "$party.state"] },
+        location: {
+          $concat: [
+            { $ifNull: ["$party.suburb", ""] },
+            ", ",
+            { $ifNull: ["$party.stateRegion", "$party.state", ""] },
+          ],
+        },
+        fleetOwner: "$party.companyName",
+        fleetOwnerName: "$party.companyName",
+        companyName: "$party.companyName",
+        mobile: { $ifNull: ["$party.phoneAlt", "$party.phone"] },
+        phone: { $ifNull: ["$party.phoneAlt", "$party.phone"] },
+        phoneNumber: { $ifNull: ["$party.phoneAlt", "$party.phone"] },
+        email: "$party.email",
+        hasEmail: {
+          $cond: {
+            if: {
+              $and: [
+                { $ne: ["$party.email", null] },
+                { $ne: ["$party.email", ""] },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+        hasMobile: {
+          $cond: {
+            if: {
+              $or: [
+                {
+                  $and: [
+                    { $ne: ["$party.phone", null] },
+                    { $ne: ["$party.phone", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$party.phoneAlt", null] },
+                    { $ne: ["$party.phoneAlt", ""] },
+                  ],
+                },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+      },
+    });
+
+    // Sort by driver code
+    pipeline.push({
+      $sort: { driverNumber: 1 },
+    });
+
+    const drivers = await Driver.aggregate(pipeline);
+
+    return drivers;
+  }
+
+  /**
    * Get vehicle type codes for broadcast filtering
    * @param {Object} user - Authenticated user
    * @returns {Array} Array of vehicle type codes (strings)
@@ -377,8 +643,43 @@ class BroadcastService {
       );
     }
 
-    // Validate filter arrays (same as preview)
-    const errors = [];
+    // Check if driverIds are provided (new method) or filters (existing method)
+    let drivers = [];
+    let totalRecipients = 0;
+    let filterVehicleTypes = [];
+    let filterStates = [];
+    let filterSuburbs = [];
+    let filterServiceTypes = [];
+    let filterContactTypes = [];
+
+    if (data.driverIds && Array.isArray(data.driverIds) && data.driverIds.length > 0) {
+      // New method: Send to specific driver IDs
+      // Validate driver IDs
+      const validDriverIds = data.driverIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validDriverIds.length === 0) {
+        throw new AppError("Invalid driver IDs provided", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      // Get drivers by IDs
+      const driverDocs = await Driver.find({
+        _id: { $in: validDriverIds },
+      })
+        .populate("partyId", "firstName lastName email phone phoneAlt suburb state stateRegion companyName")
+        .lean();
+
+      drivers = driverDocs.map((driver) => ({
+        ...driver,
+        party: driver.partyId,
+      }));
+
+      totalRecipients = drivers.length;
+    } else {
+      // Existing method: Use filters
+      // Validate filter arrays (same as preview)
+      const errors = [];
 
     if (data.filterVehicleTypes !== undefined && !Array.isArray(data.filterVehicleTypes)) {
       errors.push({
@@ -421,15 +722,15 @@ class BroadcastService {
       throw error;
     }
 
-    // Extract filter arrays (default to empty arrays)
-    const filterVehicleTypes = data.filterVehicleTypes || [];
-    const filterStates = data.filterStates || [];
-    const filterSuburbs = data.filterSuburbs || [];
-    const filterServiceTypes = data.filterServiceTypes || [];
-    const filterContactTypes = data.filterContactTypes || [];
+      // Extract filter arrays (default to empty arrays)
+      filterVehicleTypes = data.filterVehicleTypes || [];
+      filterStates = data.filterStates || [];
+      filterSuburbs = data.filterSuburbs || [];
+      filterServiceTypes = data.filterServiceTypes || [];
+      filterContactTypes = data.filterContactTypes || [];
 
-    // Build aggregation pipeline (same as preview, but no limit)
-    const pipeline = [];
+      // Build aggregation pipeline (same as preview, but no limit)
+      const pipeline = [];
 
     // Match stage: Base driver filters
     // Note: isActive defaults to false in Driver model
@@ -521,34 +822,55 @@ class BroadcastService {
       });
     }
 
-    // Get total count
-    const countPipeline = [...pipeline, { $count: "total" }];
-    const countResult = await Driver.aggregate(countPipeline);
-    const totalRecipients = countResult.length > 0 ? countResult[0].total : 0;
+      // Get total count
+      const countPipeline = [...pipeline, { $count: "total" }];
+      const countResult = await Driver.aggregate(countPipeline);
+      totalRecipients = countResult.length > 0 ? countResult[0].total : 0;
 
-    if (totalRecipients === 0) {
-      throw new AppError(
-        "No drivers match the filter criteria",
-        HttpStatusCodes.BAD_REQUEST
-      );
+      if (totalRecipients === 0) {
+        throw new AppError(
+          "No drivers match the filter criteria",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      // Project stage: Select needed fields for sending
+      pipeline.push({
+        $project: {
+          _id: 1,
+          driverCode: 1,
+          "party.email": 1,
+          "party.phone": 1,
+          "party.phoneAlt": 1,
+          "party.firstName": 1,
+          "party.lastName": 1,
+        },
+      });
+
+      // Execute aggregation to get all matching drivers
+      const driverResults = await Driver.aggregate(pipeline);
+      drivers = driverResults.map((driver) => ({
+        ...driver,
+        party: driver.party || {},
+      }));
     }
-
-    // Project stage: Select needed fields for sending
-    pipeline.push({
-      $project: {
-        _id: 1,
-        driverCode: 1,
-        "party.email": 1,
-        "party.phone": 1,
-        "party.phoneAlt": 1,
-      },
-    });
-
-    // Execute aggregation to get all matching drivers
-    const drivers = await Driver.aggregate(pipeline);
 
     // Create broadcast record
     const sentAt = new Date();
+    
+    // Determine filters object
+    let filtersObj = {};
+    if (!data.driverIds || !Array.isArray(data.driverIds) || data.driverIds.length === 0) {
+      // Only set filters if not using driverIds
+      filtersObj = {
+        vehicleTypes: filterVehicleTypes || [],
+        states: filterStates || [],
+        suburbs: filterSuburbs || [],
+        serviceTypes: filterServiceTypes || [],
+        contactTypes: filterContactTypes || [],
+      };
+    }
+    
     const broadcast = await Broadcast.create({
       subject: data.subject.trim(),
       message: data.message.trim(),
@@ -564,13 +886,7 @@ class BroadcastService {
       organizationId: organizationId
         ? new mongoose.Types.ObjectId(organizationId)
         : null,
-      filters: {
-        vehicleTypes: filterVehicleTypes,
-        states: filterStates,
-        suburbs: filterSuburbs,
-        serviceTypes: filterServiceTypes,
-        contactTypes: filterContactTypes,
-      },
+      filters: filtersObj,
     });
 
     // Initialize SendGrid if API key is available
@@ -661,12 +977,23 @@ class BroadcastService {
       status,
     });
 
+    // Fetch updated broadcast
+    const updatedBroadcast = await Broadcast.findById(broadcast._id).lean();
+
     return {
-      totalRecipients,
-      emailsSent,
-      emailsFailed,
-      smsSent,
-      smsFailed,
+      id: updatedBroadcast._id.toString(),
+      subject: updatedBroadcast.subject,
+      message: updatedBroadcast.message,
+      method: updatedBroadcast.method,
+      totalRecipients: updatedBroadcast.totalRecipients,
+      emailsSent: updatedBroadcast.emailsSent,
+      emailsFailed: updatedBroadcast.emailsFailed,
+      smsSent: updatedBroadcast.smsSent,
+      smsFailed: updatedBroadcast.smsFailed,
+      status: updatedBroadcast.status,
+      sentBy: updatedBroadcast.sentByUserId.toString(),
+      sentAt: updatedBroadcast.sentAt.toISOString(),
+      createdAt: updatedBroadcast.createdAt.toISOString(),
     };
   }
 

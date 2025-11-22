@@ -15,6 +15,18 @@ class BroadcastController {
   });
 
   /**
+   * Get drivers for broadcast with filtering
+   * GET /api/v1/drivers/broadcast
+   */
+  static getDriversForBroadcast = catchAsyncHandler(async (req, res) => {
+    const drivers = await BroadcastService.getDriversForBroadcast(req.query, req.user);
+    return res.status(200).json({
+      success: true,
+      data: drivers,
+    });
+  });
+
+  /**
    * Get vehicle type codes for broadcast filtering
    * GET /api/v1/broadcasts/vehicle-types
    */
