@@ -1067,6 +1067,295 @@ class BroadcastService {
   }
 
   /**
+   * Get customers for broadcast with filtering and search
+   * @param {Object} query - Query parameters (search, accountType, status, state, suburb, industry, paymentTerms)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of customer objects formatted for broadcast
+   */
+  static async getCustomersForBroadcast(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build match conditions - ensure we only get customers (not drivers)
+    const matchConditions = [];
+
+    // Base condition: active customers only
+    matchConditions.push({
+      isActive: true,
+    });
+
+    // Ensure we have a partyId (required for customers)
+    matchConditions.push({
+      partyId: { $exists: true, $ne: null },
+    });
+
+    // Build aggregation pipeline
+    const pipeline = [];
+
+    // Match stage - only customers
+    pipeline.push({
+      $match: matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0],
+    });
+
+    // Lookup party
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    pipeline.push({ $unwind: { path: "$party", preserveNullAndEmptyArrays: true } });
+
+    // Add filters
+    if (query.search) {
+      const searchRegex = new RegExp(query.search.trim(), "i");
+      pipeline.push({
+        $match: {
+          $or: [
+            { tradingName: searchRegex },
+            { legalCompanyName: searchRegex },
+            { "party.companyName": searchRegex },
+            { primaryContactName: searchRegex },
+            { primaryContactEmail: searchRegex },
+            { primaryContactPhone: searchRegex },
+            { accountsEmail: searchRegex },
+            { "party.email": searchRegex },
+            { "party.phone": searchRegex },
+            { city: searchRegex },
+            { state: searchRegex },
+            { "party.suburb": searchRegex },
+            { "party.state": searchRegex },
+            { "party.stateRegion": searchRegex },
+          ],
+        },
+      });
+    }
+
+    if (query.accountType && query.accountType !== "all") {
+      // Note: Customer model might not have accountType field, adjust based on your schema
+      // For now, we'll skip this filter if the field doesn't exist
+      pipeline.push({
+        $match: {
+          $or: [
+            { accountType: new RegExp(query.accountType.trim(), "i") },
+            // If accountType doesn't exist, you might want to use another field
+          ],
+        },
+      });
+    }
+
+    if (query.status && query.status !== "all") {
+      if (query.status.toLowerCase() === "active") {
+        pipeline.push({
+          $match: {
+            isActive: true,
+          },
+        });
+      } else if (query.status.toLowerCase() === "inactive") {
+        pipeline.push({
+          $match: {
+            isActive: false,
+          },
+        });
+      }
+    }
+
+    if (query.state && query.state !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { state: query.state },
+            { "party.state": query.state },
+            { "party.stateRegion": query.state },
+          ],
+        },
+      });
+    }
+
+    if (query.suburb && query.suburb !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { city: new RegExp(query.suburb.trim(), "i") },
+            { "party.suburb": new RegExp(query.suburb.trim(), "i") },
+          ],
+        },
+      });
+    }
+
+    if (query.industry && query.industry !== "all") {
+      // Note: Customer model might not have industry field, adjust based on your schema
+      pipeline.push({
+        $match: {
+          industry: new RegExp(query.industry.trim(), "i"),
+        },
+      });
+    }
+
+    if (query.paymentTerms && query.paymentTerms !== "all") {
+      pipeline.push({
+        $match: {
+          termsDays: parseInt(query.paymentTerms) || null,
+        },
+      });
+    }
+
+    // Project fields
+    pipeline.push({
+      $project: {
+        id: { $toString: "$_id" },
+        customerNumber: { $ifNull: ["$customerNumber", ""] },
+        code: { $ifNull: ["$customerNumber", ""] },
+        companyName: {
+          $ifNull: [
+            "$tradingName",
+            "$legalCompanyName",
+            "$party.companyName",
+            "",
+          ],
+        },
+        accountType: { $ifNull: ["$accountType", "Corporate"] },
+        industry: { $ifNull: ["$industry", ""] },
+        suburb: { $ifNull: ["$city", "$party.suburb", ""] },
+        state: { $ifNull: ["$state", "$party.stateRegion", "$party.state", ""] },
+        stateRegion: { $ifNull: ["$party.stateRegion", "$state", "$party.state", ""] },
+        location: {
+          $concat: [
+            { $ifNull: ["$city", "$party.suburb", ""] },
+            ", ",
+            { $ifNull: ["$party.stateRegion", "$state", "$party.state", ""] },
+          ],
+        },
+        contact: { $ifNull: ["$primaryContactName", ""] },
+        contactName: { $ifNull: ["$primaryContactName", ""] },
+        email: {
+          $ifNull: [
+            "$accountsEmail",
+            "$primaryContactEmail",
+            "$party.email",
+            "",
+          ],
+        },
+        phone: {
+          $ifNull: [
+            "$primaryContactPhone",
+            "$accountsPhone",
+            "$party.phone",
+            "",
+          ],
+        },
+        phoneNumber: {
+          $ifNull: [
+            "$primaryContactPhone",
+            "$accountsPhone",
+            "$party.phone",
+            "",
+          ],
+        },
+        status: {
+          $cond: {
+            if: "$isActive",
+            then: "Active",
+            else: "Inactive",
+          },
+        },
+        paymentTerms: {
+          $cond: {
+            if: { $eq: ["$termsDays", 7] },
+            then: "NET_7",
+            else: {
+              $cond: {
+                if: { $eq: ["$termsDays", 14] },
+                then: "NET_14",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$termsDays", 21] },
+                    then: "NET_21",
+                    else: {
+                      $cond: {
+                        if: { $eq: ["$termsDays", 30] },
+                        then: "NET_30",
+                        else: "NET_30",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        hasEmail: {
+          $cond: {
+            if: {
+              $or: [
+                {
+                  $and: [
+                    { $ne: ["$accountsEmail", null] },
+                    { $ne: ["$accountsEmail", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$primaryContactEmail", null] },
+                    { $ne: ["$primaryContactEmail", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$party.email", null] },
+                    { $ne: ["$party.email", ""] },
+                  ],
+                },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+        hasPhone: {
+          $cond: {
+            if: {
+              $or: [
+                {
+                  $and: [
+                    { $ne: ["$primaryContactPhone", null] },
+                    { $ne: ["$primaryContactPhone", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$accountsPhone", null] },
+                    { $ne: ["$accountsPhone", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$party.phone", null] },
+                    { $ne: ["$party.phone", ""] },
+                  ],
+                },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+      },
+    });
+
+    // Sort by customer number
+    pipeline.push({
+      $sort: { customerNumber: 1 },
+    });
+
+    const customers = await Customer.aggregate(pipeline);
+
+    return customers;
+  }
+
+  /**
    * Preview customers matching filter criteria for client broadcast
    * @param {Object} data - Filter criteria
    * @param {Object} user - Authenticated user
@@ -1267,8 +1556,42 @@ class BroadcastService {
       );
     }
 
-    // Validate filter arrays (same as preview)
-    const errors = [];
+    // Check if customerIds are provided (new method) or filters (existing method)
+    let customers = [];
+    let totalRecipients = 0;
+    let filterStates = [];
+    let filterWorkTypes = [];
+    let filterCities = [];
+
+    if (data.customerIds && Array.isArray(data.customerIds) && data.customerIds.length > 0) {
+      // New method: Send to specific customer IDs
+      // Validate customer IDs
+      const validCustomerIds = data.customerIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validCustomerIds.length === 0) {
+        throw new AppError("Invalid customer IDs provided", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      // Get customers by IDs
+      const customerDocs = await Customer.find({
+        _id: { $in: validCustomerIds },
+        isActive: true,
+      })
+        .populate("partyId", "firstName lastName email phone phoneAlt suburb state stateRegion companyName")
+        .lean();
+
+      customers = customerDocs.map((customer) => ({
+        ...customer,
+        party: customer.partyId,
+      }));
+
+      totalRecipients = customers.length;
+    } else {
+      // Existing method: Use filters
+      // Validate filter arrays (same as preview)
+      const errors = [];
 
     if (data.filterStates !== undefined && !Array.isArray(data.filterStates)) {
       errors.push({
@@ -1365,37 +1688,64 @@ class BroadcastService {
       },
     });
 
-    // Get total count
-    const countPipeline = [...pipeline, { $count: "total" }];
-    const countResult = await Customer.aggregate(countPipeline);
-    const totalRecipients = countResult.length > 0 ? countResult[0].total : 0;
+      // Get total count
+      const countPipeline = [...pipeline, { $count: "total" }];
+      const countResult = await Customer.aggregate(countPipeline);
+      totalRecipients = countResult.length > 0 ? countResult[0].total : 0;
 
-    if (totalRecipients === 0) {
-      throw new AppError(
-        "No customers match the filter criteria",
-        HttpStatusCodes.BAD_REQUEST
-      );
+      if (totalRecipients === 0) {
+        throw new AppError(
+          "No customers match the filter criteria",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      // Project stage: Select needed fields for sending
+      pipeline.push({
+        $project: {
+          _id: 1,
+          tradingName: 1,
+          legalCompanyName: 1,
+          primaryContactName: 1,
+          primaryContactEmail: 1,
+          primaryContactPhone: 1,
+          accountsEmail: 1,
+          accountsPhone: 1,
+          "party.email": 1,
+          "party.phone": 1,
+          "party.phoneAlt": 1,
+          "party.companyName": 1,
+        },
+      });
+
+      // Execute aggregation to get all matching customers
+      const customerResults = await Customer.aggregate(pipeline);
+      customers = customerResults.map((customer) => ({
+        ...customer,
+        party: customer.party || {},
+      }));
     }
-
-    // Project stage: Select needed fields for sending
-    pipeline.push({
-      $project: {
-        _id: 1,
-        "party.email": 1,
-        "party.phone": 1,
-        "party.phoneAlt": 1,
-      },
-    });
-
-    // Execute aggregation to get all matching customers
-    const customers = await Customer.aggregate(pipeline);
 
     // Create broadcast record
     const sentAt = new Date();
+    
+    // Determine filters object
+    let filtersObj = {};
+    if (!data.customerIds || !Array.isArray(data.customerIds) || data.customerIds.length === 0) {
+      // Only set filters if not using customerIds
+      filtersObj = {
+        states: filterStates || [],
+        workTypes: filterWorkTypes || [],
+        cities: filterCities || [],
+      };
+    }
+    
     const broadcast = await ClientBroadcast.create({
       subject: data.subject.trim(),
       message: data.message.trim(),
       method: data.method,
+      template: data.template || null,
+      priority: data.priority || "normal",
       totalRecipients: totalRecipients,
       emailsSent: 0,
       emailsFailed: 0,
@@ -1407,11 +1757,7 @@ class BroadcastService {
       organizationId: organizationId
         ? new mongoose.Types.ObjectId(organizationId)
         : null,
-      filters: {
-        states: filterStates,
-        workTypes: filterWorkTypes,
-        cities: filterCities,
-      },
+      filters: filtersObj,
     });
 
     // Initialize SendGrid if API key is available
@@ -1428,8 +1774,10 @@ class BroadcastService {
     // Send messages to each customer
     for (const customer of customers) {
       const party = customer.party || {};
-      const email = party.email;
-      const phone = party.phone || party.phoneAlt;
+      // Get email from accountsEmail, primaryContactEmail, or party.email
+      const email = customer.accountsEmail || customer.primaryContactEmail || party.email;
+      // Get phone from primaryContactPhone, accountsPhone, or party.phone
+      const phone = customer.primaryContactPhone || customer.accountsPhone || party.phone || party.phoneAlt;
 
       // Send email if method includes EMAIL
       if (data.method === "EMAIL" || data.method === "BOTH") {
@@ -1502,12 +1850,25 @@ class BroadcastService {
       status,
     });
 
+    // Fetch updated broadcast
+    const updatedBroadcast = await ClientBroadcast.findById(broadcast._id).lean();
+
     return {
-      totalRecipients,
-      emailsSent,
-      emailsFailed,
-      smsSent,
-      smsFailed,
+      id: updatedBroadcast._id.toString(),
+      subject: updatedBroadcast.subject,
+      message: updatedBroadcast.message,
+      method: updatedBroadcast.method,
+      template: updatedBroadcast.template || null,
+      priority: updatedBroadcast.priority || "normal",
+      totalRecipients: updatedBroadcast.totalRecipients,
+      emailsSent: updatedBroadcast.emailsSent,
+      emailsFailed: updatedBroadcast.emailsFailed,
+      smsSent: updatedBroadcast.smsSent,
+      smsFailed: updatedBroadcast.smsFailed,
+      status: updatedBroadcast.status,
+      sentBy: updatedBroadcast.sentByUserId.toString(),
+      sentAt: updatedBroadcast.sentAt.toISOString(),
+      createdAt: updatedBroadcast.createdAt.toISOString(),
     };
   }
 }

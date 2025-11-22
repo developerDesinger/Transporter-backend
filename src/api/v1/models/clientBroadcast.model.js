@@ -18,6 +18,17 @@ const ClientBroadcastSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    template: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+    priority: {
+      type: String,
+      enum: ["normal", "high", "urgent"],
+      default: "normal",
+      index: true,
+    },
     totalRecipients: {
       type: Number,
       required: true,

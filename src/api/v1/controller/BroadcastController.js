@@ -63,6 +63,18 @@ class BroadcastController {
   });
 
   /**
+   * Get customers for broadcast with filtering
+   * GET /api/v1/customers/broadcast
+   */
+  static getCustomersForBroadcast = catchAsyncHandler(async (req, res) => {
+    const customers = await BroadcastService.getCustomersForBroadcast(req.query, req.user);
+    return res.status(200).json({
+      success: true,
+      data: customers,
+    });
+  });
+
+  /**
    * Get client broadcast history
    * GET /api/v1/client-broadcasts
    */

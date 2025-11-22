@@ -255,6 +255,14 @@ router.get(
   BroadcastController.getDriversForBroadcast
 );
 
+// GET /api/v1/customers/broadcast - Get customers for broadcast
+router.get(
+  "/customers/broadcast",
+  isAuthenticated,
+  requirePermission("operations.broadcasts.view"),
+  BroadcastController.getCustomersForBroadcast
+);
+
 router.get(
   "/drivers/:id",
   isAuthenticated,
