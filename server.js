@@ -53,15 +53,9 @@ process.on("unhandledRejection", (err) => {
   process.exit(1);
 });
 
-io.on("connection", (socket) => {
-  console.log("New client connected:", socket.id);
+// Initialize socket service for messaging
+const SocketService = require("./src/api/v1/sockets/socket.service");
+SocketService.initialize(io);
 
-  socket.on("joinRoom", (userId) => {
-    socket.join(userId);
-    console.log(`User joined room: ${userId}`);
-  });
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected");
-  });
-});
+// Legacy socket handlers (keep for backward compatibility - handled in SocketService now)
+// These are now part of SocketService.initialize()

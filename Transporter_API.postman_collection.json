@@ -29,6 +29,24 @@
       "value": "",
       "type": "string",
       "description": "Super admin token for approval endpoints"
+    },
+    {
+      "key": "channelId",
+      "value": "",
+      "type": "string",
+      "description": "Channel ID (auto-saved after creating channel)"
+    },
+    {
+      "key": "messageId",
+      "value": "",
+      "type": "string",
+      "description": "Message ID (auto-saved after sending message)"
+    },
+    {
+      "key": "conversationId",
+      "value": "",
+      "type": "string",
+      "description": "Conversation ID (auto-saved after creating a direct chat)"
     }
   ],
   "item": [
@@ -868,6 +886,684 @@
         }
       ],
       "description": "File upload endpoints"
+    },
+    {
+      "name": "Messaging",
+      "item": [
+        {
+          "name": "Channels",
+          "item": [
+            {
+              "name": "Create Channel",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "    try {",
+                      "        const responseJson = pm.response.json();",
+                      "        if (responseJson.data && responseJson.data._id) {",
+                      "            pm.collectionVariables.set('channelId', responseJson.data._id);",
+                      "            console.log('✅ Channel ID saved:', responseJson.data._id);",
+                      "        }",
+                      "    } catch (e) {",
+                      "        console.log('Error parsing response:', e);",
+                      "    }",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"allocations\",\n  \"description\": \"Channel for allocation discussions\",\n  \"members\": [],\n  \"isPrivate\": false\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels"]
+                },
+                "description": "Create a new channel. Only the creator can send messages in the channel.\n\n**Note:** Members array should contain user IDs. Empty array means only creator is in the channel."
+              },
+              "response": []
+            },
+            {
+              "name": "Get All Channels",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels?search=&starred=false",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels"],
+                  "query": [
+                    {
+                      "key": "search",
+                      "value": "",
+                      "description": "Search channels by name"
+                    },
+                    {
+                      "key": "starred",
+                      "value": "false",
+                      "description": "Filter by starred status (true/false)"
+                    }
+                  ]
+                },
+                "description": "Get all channels the authenticated user is a member of or created.\n\n**Query Parameters:**\n- `search` - Search channels by name (optional)\n- `starred` - Filter by starred status: true/false (optional)"
+              },
+              "response": []
+            },
+            {
+              "name": "Get Channel by ID",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}"]
+                },
+                "description": "Get details of a specific channel. User must be a member or creator."
+              },
+              "response": []
+            },
+            {
+              "name": "Update Channel",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"updated-channel-name\",\n  \"description\": \"Updated description\",\n  \"isPrivate\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}"]
+                },
+                "description": "Update channel details. Only the creator can update the channel.\n\n**Updatable fields:**\n- `name` - Channel name\n- `description` - Channel description\n- `isPrivate` - Privacy setting\n- `members` - Array of member user IDs"
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Channel",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}"]
+                },
+                "description": "Delete a channel. Only the creator can delete. This will also delete all messages in the channel."
+              },
+              "response": []
+            },
+            {
+              "name": "Add Members to Channel",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"memberIds\": [\"507f1f77bcf86cd799439011\", \"507f191e810c19729de860ea\"]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}/members",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}", "members"]
+                },
+                "description": "Add members to a channel. Only the creator can add members.\n\n**Note:** Replace the user IDs in `memberIds` array with actual user IDs from your system."
+              },
+              "response": []
+            },
+            {
+              "name": "Remove Members from Channel",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"memberIds\": [\"507f1f77bcf86cd799439011\"]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}/members",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}", "members"]
+                },
+                "description": "Remove members from a channel. Only the creator can remove members."
+              },
+              "response": []
+            },
+            {
+              "name": "Toggle Star Channel",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}/star",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}", "star"]
+                },
+                "description": "Toggle star status of a channel. Any member can star/unstar a channel."
+              },
+              "response": []
+            }
+          ],
+          "description": "Channel management endpoints"
+        },
+        {
+          "name": "Conversations",
+          "item": [
+            {
+              "name": "Start or Get Conversation",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201 || pm.response.code === 200) {",
+                      "    try {",
+                      "        const responseJson = pm.response.json();",
+                      "        if (responseJson.data && responseJson.data._id) {",
+                      "            pm.collectionVariables.set('conversationId', responseJson.data._id);",
+                      "            console.log('✅ Conversation ID saved:', responseJson.data._id);",
+                      "        }",
+                      "    } catch (e) {",
+                      "        console.log('Error parsing response:', e);",
+                      "    }",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"recipientId\": \"507f1f77bcf86cd799439011\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/conversations",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "messages",
+                    "conversations"
+                  ]
+                },
+                "description": "Creates a one-on-one conversation with the specified recipient. If a conversation already exists, it returns the existing one."
+              },
+              "response": []
+            },
+            {
+              "name": "List Conversations",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/conversations?search=&includeArchived=false",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "messages",
+                    "conversations"
+                  ],
+                  "query": [
+                    {
+                      "key": "search",
+                      "value": "",
+                      "description": "Search by participant name, username, or email"
+                    },
+                    {
+                      "key": "includeArchived",
+                      "value": "false",
+                      "description": "Set true to include archived conversations"
+                    }
+                  ]
+                },
+                "description": "Returns all direct conversations the authenticated user participates in, ordered by last activity."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Conversation",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/conversations/{{conversationId}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "messages",
+                    "conversations",
+                    "{{conversationId}}"
+                  ]
+                },
+                "description": "Retrieve details for a single conversation (participants, last message, timestamps)."
+              },
+              "response": []
+            },
+            {
+              "name": "Send Conversation Message",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "    try {",
+                      "        const responseJson = pm.response.json();",
+                      "        if (responseJson.data && responseJson.data._id) {",
+                      "            pm.collectionVariables.set('messageId', responseJson.data._id);",
+                      "            console.log('✅ Message ID saved:', responseJson.data._id);",
+                      "        }",
+                      "    } catch (e) {",
+                      "        console.log('Error parsing response:', e);",
+                      "    }",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"content\": \"Hey, can you review the latest job assignment?\",\n  \"messageType\": \"text\",\n  \"attachments\": []\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/conversations/{{conversationId}}/messages",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "messages",
+                    "conversations",
+                    "{{conversationId}}",
+                    "messages"
+                  ]
+                },
+                "description": "Send a direct message within the specified conversation. Both participants can send messages."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Conversation Messages",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/conversations/{{conversationId}}/messages?page=1&limit=50",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "messages",
+                    "conversations",
+                    "{{conversationId}}",
+                    "messages"
+                  ],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number (default 1)"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "description": "Messages per page (default 50)"
+                    }
+                  ]
+                },
+                "description": "Retrieve paginated direct messages for the specified conversation. Messages are returned oldest first."
+              },
+              "response": []
+            }
+          ],
+          "description": "One-on-one direct conversation APIs. Conversations are unique per participant pair—if one already exists, it is returned instead of creating a duplicate."
+        },
+        {
+          "name": "Messages",
+          "item": [
+            {
+              "name": "Send Message",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "    try {",
+                      "        const responseJson = pm.response.json();",
+                      "        if (responseJson.data && responseJson.data._id) {",
+                      "            pm.collectionVariables.set('messageId', responseJson.data._id);",
+                      "            console.log('✅ Message ID saved:', responseJson.data._id);",
+                      "        }",
+                      "    } catch (e) {",
+                      "        console.log('Error parsing response:', e);",
+                      "    }",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"content\": \"Hello everyone! This is a test message.\",\n  \"messageType\": \"text\",\n  \"attachments\": []\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}/messages",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}", "messages"]
+                },
+                "description": "Send a message to a channel. **Only the channel creator can send messages.**\n\n**Message Types:**\n- `text` - Plain text message (default)\n- `image` - Image message\n- `file` - File attachment\n- `audio` - Audio message\n- `video` - Video message\n\n**Attachments format:**\n```json\n[\n  {\n    \"url\": \"https://example.com/file.jpg\",\n    \"fileName\": \"image.jpg\",\n    \"fileType\": \"image/jpeg\",\n    \"fileSize\": 1024000\n  }\n]\n```"
+              },
+              "response": []
+            },
+            {
+              "name": "Get Messages",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/channels/{{channelId}}/messages?page=1&limit=50",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "channels", "{{channelId}}", "messages"],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number (default: 1)"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "description": "Number of messages per page (default: 50)"
+                    }
+                  ]
+                },
+                "description": "Get messages from a channel. User must be a member or creator.\n\n**Query Parameters:**\n- `page` - Page number (default: 1)\n- `limit` - Messages per page (default: 50)\n\n**Note:** Messages are returned in chronological order (oldest first)."
+              },
+              "response": []
+            },
+            {
+              "name": "Update Message",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"content\": \"Updated message content\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/messages/{{messageId}}",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "messages", "{{messageId}}"]
+                },
+                "description": "Update a message. Only the message sender can update their own messages."
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Message",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/messages/{{messageId}}",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "messages", "{{messageId}}"]
+                },
+                "description": "Delete a message (soft delete). Only the message sender can delete their own messages."
+              },
+              "response": []
+            }
+          ],
+          "description": "Message management endpoints. **Important:** Only channel creators can send messages."
+        },
+        {
+          "name": "Direct Messages",
+          "item": [
+            {
+              "name": "Get Direct Messages",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/messages/direct-messages/{{userId}}?page=1&limit=50",
+                  "host": ["{{baseUrl}}"],
+                  "path": ["api", "v1", "messages", "direct-messages", "{{userId}}"],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number (default: 1)"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "description": "Number of messages per page (default: 50)"
+                    }
+                  ]
+                },
+                "description": "Get direct messages between the authenticated user and another user.\n\n**Note:** Replace `{{userId}}` with the ID of the user you want to message with. A direct message channel will be created automatically if it doesn't exist."
+              },
+              "response": []
+            }
+          ],
+          "description": "Direct messaging endpoints for one-on-one conversations"
+        }
+      ],
+      "description": "Messaging system with channels and direct conversations. **Channel rule:** Only channel creators can send messages; members have read-only access. **Conversation rule:** Both participants can send/receive.\n\n**Socket.IO Events:**\n- Connect with JWT token in `auth.token` or `Authorization` header\n- `joinChannel` / `leaveChannel`\n- `joinConversation` / `leaveConversation`\n- `sendMessage` (channel) / `sendConversationMessage` (direct)\n- `typing` / `stopTyping` with `channelId` or `conversationId`\n- `updateMessage` / `deleteMessage`\n\n**Listen for:**\n- `newMessage` (channel)\n- `conversation:newMessage`\n- `messageUpdated` & `conversation:messageUpdated`\n- `messageDeleted` & `conversation:messageDeleted`\n- `channelUpdate` / `conversation:update`\n- `userTyping` / `userStopTyping`\n- `conversation:userTyping` / `conversation:userStopTyping`"
     }
   ],
   "event": [

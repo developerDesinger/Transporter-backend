@@ -34,6 +34,7 @@ const allocatorRoutes = require("./src/api/v1/routes/allocator");
 const invoiceRoutes = require("./src/api/v1/routes/invoice");
 const payRunRoutes = require("./src/api/v1/routes/payRun");
 const receivablesRoutes = require("./src/api/v1/routes/receivables");
+const messageRoutes = require("./src/api/v1/routes/message");
 
 const app = express();
 //const admin = require("firebase-admin");
@@ -293,6 +294,7 @@ app.use("/api/v1/pay-runs", payRunRoutes);
 app.use("/api/v1/receivables", receivablesRoutes);
 const jobsRoutes = require("./src/api/v1/routes/jobs");
 app.use("/api/v1/jobs", jobsRoutes);
+app.use("/api/v1/messages", messageRoutes);
 // app.use("/api/v1/cron", cronRoutes);
 
 // Import controllers and middleware for upload routes
