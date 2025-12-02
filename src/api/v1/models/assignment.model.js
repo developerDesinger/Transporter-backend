@@ -22,6 +22,19 @@ const AssignmentSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    startTime: {
+      type: Date,
+      default: null,
+    },
+    finishTime: {
+      type: Date,
+      default: null,
+    },
+    breakMinutes: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     organizationId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Organization",

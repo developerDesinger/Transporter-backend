@@ -3,6 +3,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs").promises;
 const MasterDataController = require("../controller/MasterDataController");
+const BroadcastController = require("../controller/BroadcastController");
 const { isAuthenticated } = require("../middlewares/auth.middleware");
 const { requirePermission, requireAnyPermission } = require("../middlewares/permission.middleware");
 
@@ -244,6 +245,22 @@ router.get(
   isAuthenticated,
   requirePermission("master_data.view"),
   MasterDataController.getAllDrivers
+);
+
+// GET /api/v1/drivers/broadcast - Get drivers for broadcast
+router.get(
+  "/drivers/broadcast",
+  isAuthenticated,
+  requirePermission("operations.broadcasts.view"),
+  BroadcastController.getDriversForBroadcast
+);
+
+// GET /api/v1/customers/broadcast - Get customers for broadcast
+router.get(
+  "/customers/broadcast",
+  isAuthenticated,
+  requirePermission("operations.broadcasts.view"),
+  BroadcastController.getCustomersForBroadcast
 );
 
 router.get(

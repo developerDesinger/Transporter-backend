@@ -35,6 +35,15 @@ const invoiceRoutes = require("./src/api/v1/routes/invoice");
 const payRunRoutes = require("./src/api/v1/routes/payRun");
 const receivablesRoutes = require("./src/api/v1/routes/receivables");
 const messageRoutes = require("./src/api/v1/routes/message");
+const adjustmentsRoutes = require("./src/api/v1/routes/adjustments");
+const broadcastsRoutes = require("./src/api/v1/routes/broadcasts");
+const clientBroadcastsRoutes = require("./src/api/v1/routes/clientBroadcasts");
+const reportsRoutes = require("./src/api/v1/routes/reports");
+const fleetRoutes = require("./src/api/v1/routes/fleet");
+const scheduleRoutes = require("./src/api/v1/routes/schedule");
+const complianceRoutes = require("./src/api/v1/routes/compliance");
+const planningRoutes = require("./src/api/v1/routes/planning");
+const invoiceDeliveryRoutes = require("./src/api/v1/routes/invoiceDelivery");
 
 const app = express();
 //const admin = require("firebase-admin");
@@ -292,9 +301,20 @@ app.use("/api/v1", allocatorRoutes);
 app.use("/api/v1/invoices", invoiceRoutes);
 app.use("/api/v1/pay-runs", payRunRoutes);
 app.use("/api/v1/receivables", receivablesRoutes);
+app.use("/api/v1/adjustments", adjustmentsRoutes);
+app.use("/api/v1/broadcasts", broadcastsRoutes);
+app.use("/api/v1/client-broadcasts", clientBroadcastsRoutes);
+app.use("/api/v1/reports", reportsRoutes);
+app.use("/api/v1/fleet", fleetRoutes);
+app.use("/api/v1/schedule", scheduleRoutes);
+app.use("/api/v1/compliance", complianceRoutes);
+app.use("/api/v1/invoice-delivery", invoiceDeliveryRoutes);
+app.use("/api/v1", planningRoutes);
 const jobsRoutes = require("./src/api/v1/routes/jobs");
 app.use("/api/v1/jobs", jobsRoutes);
 app.use("/api/v1/messages", messageRoutes);
+const assignmentsRoutes = require("./src/api/v1/routes/assignments");
+app.use("/api/v1/assignments", assignmentsRoutes);
 // app.use("/api/v1/cron", cronRoutes);
 
 // Import controllers and middleware for upload routes

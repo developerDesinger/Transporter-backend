@@ -65,6 +65,51 @@ class DashboardController {
     const drivers = await DashboardService.getActiveDrivers(user);
     return res.status(200).json(drivers);
   });
+
+  /**
+   * Get active jobs list for dashboard
+   * GET /api/v1/dashboard/active-jobs
+   */
+  static getActiveJobs = catchAsyncHandler(async (req, res) => {
+    const user = req.user;
+    const hasAccess = checkDashboardAccess(user);
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Insufficient permissions",
+      });
+    }
+
+    const result = await DashboardService.getActiveJobs(req.query, user);
+    return res.status(200).json({
+      success: true,
+      data: result.data,
+      summary: result.summary,
+    });
+  });
+
+  /**
+   * Get recent activity events
+   * GET /api/v1/dashboard/activity
+   */
+  static getRecentActivity = catchAsyncHandler(async (req, res) => {
+    const user = req.user;
+    const hasAccess = checkDashboardAccess(user);
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "Insufficient permissions",
+      });
+    }
+
+    const result = await DashboardService.getRecentActivity(req.query, user);
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
 }
 
 /**

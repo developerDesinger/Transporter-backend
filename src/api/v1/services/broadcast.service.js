@@ -1,0 +1,1877 @@
+const Broadcast = require("../models/broadcast.model");
+const ClientBroadcast = require("../models/clientBroadcast.model");
+const Customer = require("../models/customer.model");
+const User = require("../models/user.model");
+const Driver = require("../models/driver.model");
+const Party = require("../models/party.model");
+const VehicleType = require("../models/vehicleType.model");
+const ServiceCode = require("../models/serviceCode.model");
+const AppError = require("../utils/AppError");
+const HttpStatusCodes = require("../enums/httpStatusCode");
+const mongoose = require("mongoose");
+const sgMail = require("@sendgrid/mail");
+
+class BroadcastService {
+  /**
+   * Get broadcast history for organization
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of broadcast objects
+   */
+  static async getBroadcasts(user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build filter
+    const filter = {};
+    if (organizationId) {
+      filter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      filter.organizationId = null;
+    }
+
+    // Query broadcasts with populated user information
+    const broadcasts = await Broadcast.find(filter)
+      .populate({
+        path: "sentByUserId",
+        model: "User",
+        select: "firstName lastName fullName email",
+      })
+      .sort({ sentAt: -1, createdAt: -1 })
+      .lean();
+
+    // Format response
+    const formattedBroadcasts = broadcasts.map((broadcast) => {
+      // Get sentBy name from populated user or use fallback
+      let sentBy = "Unknown User";
+      if (broadcast.sentByUserId) {
+        const user = broadcast.sentByUserId;
+        sentBy =
+          user.fullName ||
+          (user.firstName && user.lastName
+            ? `${user.firstName} ${user.lastName}`.trim()
+            : user.email || "Unknown User");
+      }
+
+      return {
+        id: broadcast._id.toString(),
+        subject: broadcast.subject,
+        message: broadcast.message,
+        method: broadcast.method,
+        totalRecipients: broadcast.totalRecipients || 0,
+        emailsSent: broadcast.emailsSent || 0,
+        emailsFailed: broadcast.emailsFailed || 0,
+        smsSent: broadcast.smsSent || 0,
+        smsFailed: broadcast.smsFailed || 0,
+        status: broadcast.status || "SENT",
+        sentBy: sentBy,
+        sentAt: broadcast.sentAt.toISOString(),
+        createdAt: broadcast.createdAt.toISOString(),
+      };
+    });
+
+    return formattedBroadcasts;
+  }
+
+  /**
+   * Get drivers for broadcast with filtering and search
+   * @param {Object} query - Query parameters (search, employmentType, state, suburb, vehicleType, fleetOwner, compliance)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of driver objects formatted for broadcast
+   */
+  static async getDriversForBroadcast(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build match conditions - ensure we only get drivers (not customers)
+    const matchConditions = [];
+
+    // Base condition: active drivers only
+    // Ensure we're querying the Driver collection and only getting actual drivers
+    matchConditions.push({
+      $or: [
+        { isActive: true },
+        { isActive: { $exists: false } },
+        { isActive: null },
+      ],
+    });
+
+    // Ensure we have a partyId (required for drivers)
+    matchConditions.push({
+      partyId: { $exists: true, $ne: null },
+    });
+
+    // Ensure this is actually a driver record (has driver-specific fields)
+    // Drivers have driverCode, employmentType, or vehicleTypesInFleet
+    // Customers don't have these fields
+    matchConditions.push({
+      $or: [
+        { driverCode: { $exists: true, $ne: null } },
+        { employmentType: { $exists: true } },
+        { vehicleTypesInFleet: { $exists: true, $ne: [] } },
+        { servicesProvided: { $exists: true } },
+      ],
+    });
+
+    // Build aggregation pipeline
+    const pipeline = [];
+
+    // Match stage - only drivers
+    pipeline.push({
+      $match: matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0],
+    });
+
+    // Lookup party
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    pipeline.push({ $unwind: { path: "$party", preserveNullAndEmptyArrays: true } });
+
+    // Add filters
+    if (query.search) {
+      const searchRegex = new RegExp(query.search.trim(), "i");
+      pipeline.push({
+        $match: {
+          $or: [
+            { driverCode: searchRegex },
+            { "party.firstName": searchRegex },
+            { "party.lastName": searchRegex },
+            { "party.email": searchRegex },
+            { "party.phone": searchRegex },
+            { "party.phoneAlt": searchRegex },
+            { "party.suburb": searchRegex },
+            { "party.state": searchRegex },
+            { "party.stateRegion": searchRegex },
+          ],
+        },
+      });
+    }
+
+    if (query.employmentType && query.employmentType !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { employmentType: query.employmentType.toUpperCase() },
+            { contactType: query.employmentType },
+          ],
+        },
+      });
+    }
+
+    if (query.state && query.state !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { "party.state": query.state },
+            { "party.stateRegion": query.state },
+          ],
+        },
+      });
+    }
+
+    if (query.suburb && query.suburb !== "all") {
+      pipeline.push({
+        $match: {
+          "party.suburb": new RegExp(query.suburb.trim(), "i"),
+        },
+      });
+    }
+
+    if (query.vehicleType && query.vehicleType !== "all") {
+      pipeline.push({
+        $match: {
+          vehicleTypesInFleet: { $in: [query.vehicleType] },
+        },
+      });
+    }
+
+    if (query.fleetOwner && query.fleetOwner !== "all") {
+      // Note: Fleet owner might be stored differently, adjust based on your schema
+      pipeline.push({
+        $match: {
+          $or: [
+            { "party.companyName": new RegExp(query.fleetOwner.trim(), "i") },
+          ],
+        },
+      });
+    }
+
+    if (query.compliance && query.compliance !== "all") {
+      if (query.compliance === "compliant") {
+        pipeline.push({
+          $match: {
+            complianceStatus: "COMPLIANT",
+          },
+        });
+      } else if (query.compliance === "non-compliant") {
+        pipeline.push({
+          $match: {
+            $or: [
+              { complianceStatus: { $ne: "COMPLIANT" } },
+              { complianceStatus: null },
+            ],
+          },
+        });
+      }
+    }
+
+    // Project fields
+    pipeline.push({
+      $project: {
+        id: { $toString: "$_id" },
+        driverNumber: "$driverCode",
+        code: "$driverCode",
+        firstName: "$party.firstName",
+        lastName: "$party.lastName",
+        name: {
+          $concat: [
+            { $ifNull: ["$party.firstName", ""] },
+            " ",
+            { $ifNull: ["$party.lastName", ""] },
+          ],
+        },
+        type: {
+          $cond: {
+            if: { $eq: ["$employmentType", "EMPLOYEE"] },
+            then: "Employee",
+            else: {
+              $cond: {
+                if: { $eq: ["$employmentType", "CONTRACTOR"] },
+                then: "Contractor",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$contactType", "Fleet"] },
+                    then: "Fleet",
+                    else: "Employee",
+                  },
+                },
+              },
+            },
+          },
+        },
+        employmentType: {
+          $cond: {
+            if: { $eq: ["$employmentType", "EMPLOYEE"] },
+            then: "Employee",
+            else: {
+              $cond: {
+                if: { $eq: ["$employmentType", "CONTRACTOR"] },
+                then: "Contractor",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$contactType", "Fleet"] },
+                    then: "Fleet",
+                    else: "Employee",
+                  },
+                },
+              },
+            },
+          },
+        },
+        vehicleType: { $arrayElemAt: ["$vehicleTypesInFleet", 0] },
+        vehicle: { $arrayElemAt: ["$vehicleTypesInFleet", 0] },
+        suburb: "$party.suburb",
+        state: { $ifNull: ["$party.stateRegion", "$party.state"] },
+        stateRegion: { $ifNull: ["$party.stateRegion", "$party.state"] },
+        location: {
+          $concat: [
+            { $ifNull: ["$party.suburb", ""] },
+            ", ",
+            { $ifNull: ["$party.stateRegion", "$party.state", ""] },
+          ],
+        },
+        fleetOwner: "$party.companyName",
+        fleetOwnerName: "$party.companyName",
+        companyName: "$party.companyName",
+        mobile: { $ifNull: ["$party.phoneAlt", "$party.phone"] },
+        phone: { $ifNull: ["$party.phoneAlt", "$party.phone"] },
+        phoneNumber: { $ifNull: ["$party.phoneAlt", "$party.phone"] },
+        email: "$party.email",
+        hasEmail: {
+          $cond: {
+            if: {
+              $and: [
+                { $ne: ["$party.email", null] },
+                { $ne: ["$party.email", ""] },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+        hasMobile: {
+          $cond: {
+            if: {
+              $or: [
+                {
+                  $and: [
+                    { $ne: ["$party.phone", null] },
+                    { $ne: ["$party.phone", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$party.phoneAlt", null] },
+                    { $ne: ["$party.phoneAlt", ""] },
+                  ],
+                },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+      },
+    });
+
+    // Sort by driver code
+    pipeline.push({
+      $sort: { driverNumber: 1 },
+    });
+
+    const drivers = await Driver.aggregate(pipeline);
+
+    return drivers;
+  }
+
+  /**
+   * Get vehicle type codes for broadcast filtering
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of vehicle type codes (strings)
+   */
+  static async getVehicleTypes(user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Option 1: Try VehicleType model first (recommended if available)
+    const vehicleTypeFilter = {
+      isActive: true,
+    };
+
+    if (organizationId) {
+      vehicleTypeFilter.$or = [
+        { organizationId: new mongoose.Types.ObjectId(organizationId) },
+        { organizationId: null }, // Global vehicle types
+      ];
+    } else {
+      vehicleTypeFilter.organizationId = null;
+    }
+
+    const vehicleTypes = await VehicleType.find(vehicleTypeFilter)
+      .select("code")
+      .sort({ sortOrder: 1, code: 1 })
+      .lean();
+
+    if (vehicleTypes && vehicleTypes.length > 0) {
+      // Extract codes and filter out null/empty values
+      const codes = vehicleTypes
+        .map((vt) => vt.code)
+        .filter((code) => code && code.trim() !== "");
+
+      if (codes.length > 0) {
+        return codes;
+      }
+    }
+
+    // Option 2: Fallback to ServiceCode vehicleClass field
+    const serviceCodeFilter = {
+      vehicleClass: { $ne: null, $ne: "" },
+      isActive: true,
+    };
+
+    if (organizationId) {
+      serviceCodeFilter.$or = [
+        { organizationId: new mongoose.Types.ObjectId(organizationId) },
+        { organizationId: null }, // Global service codes
+      ];
+    } else {
+      serviceCodeFilter.organizationId = null;
+    }
+
+    // Get distinct vehicle classes from service codes
+    const vehicleClasses = await ServiceCode.distinct("vehicleClass", serviceCodeFilter);
+
+    // Filter out null/empty values and sort
+    const codes = vehicleClasses
+      .filter((code) => code && code.trim() !== "")
+      .sort();
+
+    return codes;
+  }
+
+  /**
+   * Preview drivers matching filter criteria for broadcast
+   * @param {Object} data - Filter criteria
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Count and list of matching drivers
+   */
+  static async previewBroadcast(data, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validate request
+    const errors = [];
+
+    if (data.filterVehicleTypes !== undefined && !Array.isArray(data.filterVehicleTypes)) {
+      errors.push({
+        field: "filterVehicleTypes",
+        message: "filterVehicleTypes must be an array",
+      });
+    }
+
+    if (data.filterStates !== undefined && !Array.isArray(data.filterStates)) {
+      errors.push({
+        field: "filterStates",
+        message: "filterStates must be an array",
+      });
+    }
+
+    if (data.filterSuburbs !== undefined && !Array.isArray(data.filterSuburbs)) {
+      errors.push({
+        field: "filterSuburbs",
+        message: "filterSuburbs must be an array",
+      });
+    }
+
+    if (data.filterServiceTypes !== undefined && !Array.isArray(data.filterServiceTypes)) {
+      errors.push({
+        field: "filterServiceTypes",
+        message: "filterServiceTypes must be an array",
+      });
+    }
+
+    if (data.filterContactTypes !== undefined && !Array.isArray(data.filterContactTypes)) {
+      errors.push({
+        field: "filterContactTypes",
+        message: "filterContactTypes must be an array",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Invalid filter data", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Extract filter arrays (default to empty arrays)
+    const filterVehicleTypes = data.filterVehicleTypes || [];
+    const filterStates = data.filterStates || [];
+    const filterSuburbs = data.filterSuburbs || [];
+    const filterServiceTypes = data.filterServiceTypes || [];
+    const filterContactTypes = data.filterContactTypes || [];
+
+    // Build aggregation pipeline for efficient filtering
+    const pipeline = [];
+
+    // Match stage: Base driver filters
+    // Note: isActive defaults to false in Driver model
+    // We'll filter by isActive: true, but also include drivers where isActive is not set (for backward compatibility)
+    const matchConditions = [
+      {
+        $or: [
+          { isActive: true },
+          { isActive: { $exists: false } }, // Include drivers where isActive doesn't exist
+          { isActive: null }, // Include drivers where isActive is null
+        ],
+      },
+    ];
+
+    // Vehicle types filter (array contains any)
+    // For array fields, $in checks if the array contains any of the specified values
+    if (filterVehicleTypes.length > 0) {
+      matchConditions.push({
+        vehicleTypesInFleet: {
+          $in: filterVehicleTypes,
+        },
+      });
+    }
+
+    // Service types filter (array contains any)
+    // For array fields, $in checks if the array contains any of the specified values
+    if (filterServiceTypes.length > 0) {
+      matchConditions.push({
+        servicesProvided: {
+          $in: filterServiceTypes,
+        },
+      });
+    }
+
+    // Contact types filter
+    if (filterContactTypes.length > 0) {
+      matchConditions.push({
+        contactType: { $in: filterContactTypes },
+      });
+    }
+
+    // Combine all match conditions with $and
+    const matchStage = matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0];
+
+    pipeline.push({ $match: matchStage });
+
+    // Lookup stage: Join with Party collection
+    pipeline.push({
+      $lookup: {
+        from: "parties", // MongoDB collection name (lowercase, pluralized)
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    // Unwind party array (should be single party per driver)
+    pipeline.push({
+      $unwind: {
+        path: "$party",
+        preserveNullAndEmptyArrays: true, // Keep drivers even if party not found
+      },
+    });
+
+    // Filter by states (from Party.stateRegion) - case-insensitive
+    if (filterStates.length > 0) {
+      // Use $expr with $in for case-insensitive matching
+      pipeline.push({
+        $match: {
+          $expr: {
+            $in: [
+              { $toUpper: { $ifNull: ["$party.stateRegion", ""] } },
+              filterStates.map((s) => s.toUpperCase()),
+            ],
+          },
+        },
+      });
+    }
+
+    // Filter by suburbs (case-insensitive, from Party.suburb)
+    if (filterSuburbs.length > 0) {
+      // Use $expr with $in for case-insensitive matching
+      const suburbLower = filterSuburbs.map((s) => s.toLowerCase());
+      pipeline.push({
+        $match: {
+          $expr: {
+            $in: [
+              { $toLower: { $ifNull: ["$party.suburb", ""] } },
+              suburbLower,
+            ],
+          },
+        },
+      });
+    }
+
+    // Sort by driverCode
+    pipeline.push({
+      $sort: { driverCode: 1 },
+    });
+
+    // Get total count (before limiting)
+    const countPipeline = [...pipeline, { $count: "total" }];
+    const countResult = await Driver.aggregate(countPipeline);
+    const totalCount = countResult.length > 0 ? countResult[0].total : 0;
+
+    // Limit results for preview (first 100 drivers)
+    pipeline.push({ $limit: 100 });
+
+    // Project stage: Select only needed fields
+    pipeline.push({
+      $project: {
+        _id: 1,
+        driverCode: 1,
+        vehicleTypesInFleet: 1,
+        servicesProvided: 1,
+        contactType: 1,
+        "party.firstName": 1,
+        "party.lastName": 1,
+        "party.email": 1,
+        "party.phone": 1,
+        "party.companyName": 1,
+        "party.suburb": 1,
+        "party.stateRegion": 1,
+      },
+    });
+
+    // Execute aggregation
+    const drivers = await Driver.aggregate(pipeline);
+
+    // Format response
+    const formattedDrivers = drivers.map((driver) => {
+      const party = driver.party || {};
+
+      return {
+        id: driver._id.toString(),
+        driverNumber: driver.driverCode || "",
+        firstName: party.firstName || "",
+        lastName: party.lastName || "",
+        email: party.email || "",
+        phone: party.phone || "",
+        companyName: party.companyName || "",
+        stateRegion: party.stateRegion || "",
+        suburb: party.suburb || "",
+        vehicleTypesInFleet: driver.vehicleTypesInFleet || [],
+        servicesProvided: driver.servicesProvided || [],
+        contactType: driver.contactType || "",
+      };
+    });
+
+    return {
+      count: totalCount,
+      drivers: formattedDrivers,
+    };
+  }
+
+  /**
+   * Send broadcast to drivers matching filter criteria
+   * @param {Object} data - Broadcast data (subject, message, method, filters)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Delivery statistics
+   */
+  static async sendBroadcast(data, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validate required fields
+    if (!data.subject || !data.subject.trim()) {
+      throw new AppError("Subject is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!data.message || !data.message.trim()) {
+      throw new AppError("Message is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!data.method || !["EMAIL", "SMS", "BOTH"].includes(data.method)) {
+      throw new AppError(
+        "Method must be EMAIL, SMS, or BOTH",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Check if driverIds are provided (new method) or filters (existing method)
+    let drivers = [];
+    let totalRecipients = 0;
+    let filterVehicleTypes = [];
+    let filterStates = [];
+    let filterSuburbs = [];
+    let filterServiceTypes = [];
+    let filterContactTypes = [];
+
+    if (data.driverIds && Array.isArray(data.driverIds) && data.driverIds.length > 0) {
+      // New method: Send to specific driver IDs
+      // Validate driver IDs
+      const validDriverIds = data.driverIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validDriverIds.length === 0) {
+        throw new AppError("Invalid driver IDs provided", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      // Get drivers by IDs
+      const driverDocs = await Driver.find({
+        _id: { $in: validDriverIds },
+      })
+        .populate("partyId", "firstName lastName email phone phoneAlt suburb state stateRegion companyName")
+        .lean();
+
+      drivers = driverDocs.map((driver) => ({
+        ...driver,
+        party: driver.partyId,
+      }));
+
+      totalRecipients = drivers.length;
+    } else {
+      // Existing method: Use filters
+      // Validate filter arrays (same as preview)
+      const errors = [];
+
+    if (data.filterVehicleTypes !== undefined && !Array.isArray(data.filterVehicleTypes)) {
+      errors.push({
+        field: "filterVehicleTypes",
+        message: "filterVehicleTypes must be an array",
+      });
+    }
+
+    if (data.filterStates !== undefined && !Array.isArray(data.filterStates)) {
+      errors.push({
+        field: "filterStates",
+        message: "filterStates must be an array",
+      });
+    }
+
+    if (data.filterSuburbs !== undefined && !Array.isArray(data.filterSuburbs)) {
+      errors.push({
+        field: "filterSuburbs",
+        message: "filterSuburbs must be an array",
+      });
+    }
+
+    if (data.filterServiceTypes !== undefined && !Array.isArray(data.filterServiceTypes)) {
+      errors.push({
+        field: "filterServiceTypes",
+        message: "filterServiceTypes must be an array",
+      });
+    }
+
+    if (data.filterContactTypes !== undefined && !Array.isArray(data.filterContactTypes)) {
+      errors.push({
+        field: "filterContactTypes",
+        message: "filterContactTypes must be an array",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Invalid filter data", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+      // Extract filter arrays (default to empty arrays)
+      filterVehicleTypes = data.filterVehicleTypes || [];
+      filterStates = data.filterStates || [];
+      filterSuburbs = data.filterSuburbs || [];
+      filterServiceTypes = data.filterServiceTypes || [];
+      filterContactTypes = data.filterContactTypes || [];
+
+      // Build aggregation pipeline (same as preview, but no limit)
+      const pipeline = [];
+
+    // Match stage: Base driver filters
+    // Note: isActive defaults to false in Driver model
+    // We'll filter by isActive: true, but also include drivers where isActive is not set (for backward compatibility)
+    const matchConditions = [
+      {
+        $or: [
+          { isActive: true },
+          { isActive: { $exists: false } }, // Include drivers where isActive doesn't exist
+          { isActive: null }, // Include drivers where isActive is null
+        ],
+      },
+    ];
+
+    // Vehicle types filter
+    if (filterVehicleTypes.length > 0) {
+      matchConditions.push({
+        vehicleTypesInFleet: {
+          $in: filterVehicleTypes,
+        },
+      });
+    }
+
+    // Service types filter
+    if (filterServiceTypes.length > 0) {
+      matchConditions.push({
+        servicesProvided: {
+          $in: filterServiceTypes,
+        },
+      });
+    }
+
+    // Contact types filter
+    if (filterContactTypes.length > 0) {
+      matchConditions.push({
+        contactType: { $in: filterContactTypes },
+      });
+    }
+
+    // Combine all match conditions with $and
+    const matchStage = matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0];
+
+    pipeline.push({ $match: matchStage });
+
+    // Lookup stage: Join with Party collection
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    // Unwind party array
+    pipeline.push({
+      $unwind: {
+        path: "$party",
+        preserveNullAndEmptyArrays: true,
+      },
+    });
+
+    // Filter by states (case-insensitive)
+    if (filterStates.length > 0) {
+      pipeline.push({
+        $match: {
+          $expr: {
+            $in: [
+              { $toUpper: { $ifNull: ["$party.stateRegion", ""] } },
+              filterStates.map((s) => s.toUpperCase()),
+            ],
+          },
+        },
+      });
+    }
+
+    // Filter by suburbs (case-insensitive)
+    if (filterSuburbs.length > 0) {
+      const suburbLower = filterSuburbs.map((s) => s.toLowerCase());
+      pipeline.push({
+        $match: {
+          $expr: {
+            $in: [
+              { $toLower: { $ifNull: ["$party.suburb", ""] } },
+              suburbLower,
+            ],
+          },
+        },
+      });
+    }
+
+      // Get total count
+      const countPipeline = [...pipeline, { $count: "total" }];
+      const countResult = await Driver.aggregate(countPipeline);
+      totalRecipients = countResult.length > 0 ? countResult[0].total : 0;
+
+      if (totalRecipients === 0) {
+        throw new AppError(
+          "No drivers match the filter criteria",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      // Project stage: Select needed fields for sending
+      pipeline.push({
+        $project: {
+          _id: 1,
+          driverCode: 1,
+          "party.email": 1,
+          "party.phone": 1,
+          "party.phoneAlt": 1,
+          "party.firstName": 1,
+          "party.lastName": 1,
+        },
+      });
+
+      // Execute aggregation to get all matching drivers
+      const driverResults = await Driver.aggregate(pipeline);
+      drivers = driverResults.map((driver) => ({
+        ...driver,
+        party: driver.party || {},
+      }));
+    }
+
+    // Create broadcast record
+    const sentAt = new Date();
+    
+    // Determine filters object
+    let filtersObj = {};
+    if (!data.driverIds || !Array.isArray(data.driverIds) || data.driverIds.length === 0) {
+      // Only set filters if not using driverIds
+      filtersObj = {
+        vehicleTypes: filterVehicleTypes || [],
+        states: filterStates || [],
+        suburbs: filterSuburbs || [],
+        serviceTypes: filterServiceTypes || [],
+        contactTypes: filterContactTypes || [],
+      };
+    }
+    
+    const broadcast = await Broadcast.create({
+      subject: data.subject.trim(),
+      message: data.message.trim(),
+      method: data.method,
+      totalRecipients: totalRecipients,
+      emailsSent: 0,
+      emailsFailed: 0,
+      smsSent: 0,
+      smsFailed: 0,
+      status: "PENDING",
+      sentByUserId: user._id || user.id,
+      sentAt: sentAt,
+      organizationId: organizationId
+        ? new mongoose.Types.ObjectId(organizationId)
+        : null,
+      filters: filtersObj,
+    });
+
+    // Initialize SendGrid if API key is available
+    if (process.env.SENDGRID_API_KEY) {
+      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    }
+
+    // Track delivery statistics
+    let emailsSent = 0;
+    let emailsFailed = 0;
+    let smsSent = 0;
+    let smsFailed = 0;
+
+    // Send messages to each driver
+    for (const driver of drivers) {
+      const party = driver.party || {};
+      const email = party.email;
+      const phone = party.phone || party.phoneAlt;
+
+      // Send email if method includes EMAIL
+      if (data.method === "EMAIL" || data.method === "BOTH") {
+        if (email && email.trim()) {
+          try {
+            const mailOptions = {
+              to: email.trim(),
+              from: process.env.FROM_EMAIL || "noreply@transporter.digital",
+              subject: data.subject.trim(),
+              text: data.message.trim(),
+              html: data.message.trim().replace(/\n/g, "<br>"),
+            };
+
+            if (process.env.SENDGRID_API_KEY) {
+              await sgMail.send(mailOptions);
+              emailsSent++;
+            } else {
+              // Log if SendGrid not configured
+              console.log(`📧 Would send email to ${email}:`, data.subject);
+              emailsSent++; // Count as sent for development
+            }
+          } catch (error) {
+            console.error(`❌ Failed to send email to ${email}:`, error.message);
+            emailsFailed++;
+          }
+        } else {
+          emailsFailed++;
+        }
+      }
+
+      // Send SMS if method includes SMS
+      if (data.method === "SMS" || data.method === "BOTH") {
+        if (phone && phone.trim()) {
+          try {
+            // TODO: Integrate with actual SMS service (Twilio, AWS SNS, etc.)
+            // For now, just log the SMS
+            const smsMessage = `${data.subject.trim()}\n\n${data.message.trim()}`;
+            console.log(`📱 Sending SMS to ${phone}:`, smsMessage);
+
+            // In production, call SMS service:
+            // await sendSMS(phone, smsMessage);
+
+            smsSent++; // Count as sent for development
+          } catch (error) {
+            console.error(`❌ Failed to send SMS to ${phone}:`, error.message);
+            smsFailed++;
+          }
+        } else {
+          smsFailed++;
+        }
+      }
+    }
+
+    // Determine final status
+    let status = "SENT";
+    if (emailsFailed + smsFailed > 0) {
+      if (emailsSent + smsSent === 0) {
+        status = "FAILED";
+      } else {
+        status = "PARTIAL";
+      }
+    }
+
+    // Update broadcast record with delivery statistics
+    await Broadcast.findByIdAndUpdate(broadcast._id, {
+      emailsSent,
+      emailsFailed,
+      smsSent,
+      smsFailed,
+      status,
+    });
+
+    // Fetch updated broadcast
+    const updatedBroadcast = await Broadcast.findById(broadcast._id).lean();
+
+    return {
+      id: updatedBroadcast._id.toString(),
+      subject: updatedBroadcast.subject,
+      message: updatedBroadcast.message,
+      method: updatedBroadcast.method,
+      totalRecipients: updatedBroadcast.totalRecipients,
+      emailsSent: updatedBroadcast.emailsSent,
+      emailsFailed: updatedBroadcast.emailsFailed,
+      smsSent: updatedBroadcast.smsSent,
+      smsFailed: updatedBroadcast.smsFailed,
+      status: updatedBroadcast.status,
+      sentBy: updatedBroadcast.sentByUserId.toString(),
+      sentAt: updatedBroadcast.sentAt.toISOString(),
+      createdAt: updatedBroadcast.createdAt.toISOString(),
+    };
+  }
+
+  /**
+   * Get client broadcast history for organization
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of formatted client broadcast objects
+   */
+  static async getClientBroadcasts(user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build query filter
+    const filter = {};
+    if (organizationId) {
+      filter.organizationId = new mongoose.Types.ObjectId(organizationId);
+    } else {
+      // If no organizationId, include broadcasts with null organizationId
+      filter.organizationId = null;
+    }
+
+    // Query broadcasts with populated user information
+    const broadcasts = await ClientBroadcast.find(filter)
+      .populate({
+        path: "sentByUserId",
+        model: "User",
+        select: "firstName lastName fullName email",
+      })
+      .sort({ sentAt: -1, createdAt: -1 })
+      .lean();
+
+    // Format response
+    const formattedBroadcasts = broadcasts.map((broadcast) => {
+      // Get sentBy name from populated user or use fallback
+      let sentBy = "Unknown User";
+      if (broadcast.sentByUserId) {
+        const user = broadcast.sentByUserId;
+        sentBy =
+          user.fullName ||
+          (user.firstName && user.lastName
+            ? `${user.firstName} ${user.lastName}`.trim()
+            : user.email || "Unknown User");
+      }
+
+      // Extract filter criteria from filters object
+      const filters = broadcast.filters || {};
+      const filterStates = filters.states || [];
+      const filterWorkTypes = filters.workTypes || [];
+      const filterCities = filters.cities || [];
+
+      return {
+        id: broadcast._id.toString(),
+        subject: broadcast.subject,
+        message: broadcast.message,
+        method: broadcast.method,
+        filterStates: filterStates,
+        filterWorkTypes: filterWorkTypes,
+        filterCities: filterCities,
+        totalRecipients: broadcast.totalRecipients || 0,
+        emailsSent: broadcast.emailsSent || 0,
+        emailsFailed: broadcast.emailsFailed || 0,
+        smsSent: broadcast.smsSent || 0,
+        smsFailed: broadcast.smsFailed || 0,
+        status: broadcast.status || "SENT",
+        sentBy: sentBy,
+        sentAt: broadcast.sentAt.toISOString(),
+        createdAt: broadcast.createdAt.toISOString(),
+      };
+    });
+
+    return formattedBroadcasts;
+  }
+
+  /**
+   * Get customers for broadcast with filtering and search
+   * @param {Object} query - Query parameters (search, accountType, status, state, suburb, industry, paymentTerms)
+   * @param {Object} user - Authenticated user
+   * @returns {Array} Array of customer objects formatted for broadcast
+   */
+  static async getCustomersForBroadcast(query, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Build match conditions - ensure we only get customers (not drivers)
+    const matchConditions = [];
+
+    // Base condition: active customers only
+    matchConditions.push({
+      isActive: true,
+    });
+
+    // Ensure we have a partyId (required for customers)
+    matchConditions.push({
+      partyId: { $exists: true, $ne: null },
+    });
+
+    // Build aggregation pipeline
+    const pipeline = [];
+
+    // Match stage - only customers
+    pipeline.push({
+      $match: matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0],
+    });
+
+    // Lookup party
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    pipeline.push({ $unwind: { path: "$party", preserveNullAndEmptyArrays: true } });
+
+    // Add filters
+    if (query.search) {
+      const searchRegex = new RegExp(query.search.trim(), "i");
+      pipeline.push({
+        $match: {
+          $or: [
+            { tradingName: searchRegex },
+            { legalCompanyName: searchRegex },
+            { "party.companyName": searchRegex },
+            { primaryContactName: searchRegex },
+            { primaryContactEmail: searchRegex },
+            { primaryContactPhone: searchRegex },
+            { accountsEmail: searchRegex },
+            { "party.email": searchRegex },
+            { "party.phone": searchRegex },
+            { city: searchRegex },
+            { state: searchRegex },
+            { "party.suburb": searchRegex },
+            { "party.state": searchRegex },
+            { "party.stateRegion": searchRegex },
+          ],
+        },
+      });
+    }
+
+    if (query.accountType && query.accountType !== "all") {
+      // Note: Customer model might not have accountType field, adjust based on your schema
+      // For now, we'll skip this filter if the field doesn't exist
+      pipeline.push({
+        $match: {
+          $or: [
+            { accountType: new RegExp(query.accountType.trim(), "i") },
+            // If accountType doesn't exist, you might want to use another field
+          ],
+        },
+      });
+    }
+
+    if (query.status && query.status !== "all") {
+      if (query.status.toLowerCase() === "active") {
+        pipeline.push({
+          $match: {
+            isActive: true,
+          },
+        });
+      } else if (query.status.toLowerCase() === "inactive") {
+        pipeline.push({
+          $match: {
+            isActive: false,
+          },
+        });
+      }
+    }
+
+    if (query.state && query.state !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { state: query.state },
+            { "party.state": query.state },
+            { "party.stateRegion": query.state },
+          ],
+        },
+      });
+    }
+
+    if (query.suburb && query.suburb !== "all") {
+      pipeline.push({
+        $match: {
+          $or: [
+            { city: new RegExp(query.suburb.trim(), "i") },
+            { "party.suburb": new RegExp(query.suburb.trim(), "i") },
+          ],
+        },
+      });
+    }
+
+    if (query.industry && query.industry !== "all") {
+      // Note: Customer model might not have industry field, adjust based on your schema
+      pipeline.push({
+        $match: {
+          industry: new RegExp(query.industry.trim(), "i"),
+        },
+      });
+    }
+
+    if (query.paymentTerms && query.paymentTerms !== "all") {
+      pipeline.push({
+        $match: {
+          termsDays: parseInt(query.paymentTerms) || null,
+        },
+      });
+    }
+
+    // Project fields
+    pipeline.push({
+      $project: {
+        id: { $toString: "$_id" },
+        customerNumber: { $ifNull: ["$customerNumber", ""] },
+        code: { $ifNull: ["$customerNumber", ""] },
+        companyName: {
+          $ifNull: [
+            "$tradingName",
+            "$legalCompanyName",
+            "$party.companyName",
+            "",
+          ],
+        },
+        accountType: { $ifNull: ["$accountType", "Corporate"] },
+        industry: { $ifNull: ["$industry", ""] },
+        suburb: { $ifNull: ["$city", "$party.suburb", ""] },
+        state: { $ifNull: ["$state", "$party.stateRegion", "$party.state", ""] },
+        stateRegion: { $ifNull: ["$party.stateRegion", "$state", "$party.state", ""] },
+        location: {
+          $concat: [
+            { $ifNull: ["$city", "$party.suburb", ""] },
+            ", ",
+            { $ifNull: ["$party.stateRegion", "$state", "$party.state", ""] },
+          ],
+        },
+        contact: { $ifNull: ["$primaryContactName", ""] },
+        contactName: { $ifNull: ["$primaryContactName", ""] },
+        email: {
+          $ifNull: [
+            "$accountsEmail",
+            "$primaryContactEmail",
+            "$party.email",
+            "",
+          ],
+        },
+        phone: {
+          $ifNull: [
+            "$primaryContactPhone",
+            "$accountsPhone",
+            "$party.phone",
+            "",
+          ],
+        },
+        phoneNumber: {
+          $ifNull: [
+            "$primaryContactPhone",
+            "$accountsPhone",
+            "$party.phone",
+            "",
+          ],
+        },
+        status: {
+          $cond: {
+            if: "$isActive",
+            then: "Active",
+            else: "Inactive",
+          },
+        },
+        paymentTerms: {
+          $cond: {
+            if: { $eq: ["$termsDays", 7] },
+            then: "NET_7",
+            else: {
+              $cond: {
+                if: { $eq: ["$termsDays", 14] },
+                then: "NET_14",
+                else: {
+                  $cond: {
+                    if: { $eq: ["$termsDays", 21] },
+                    then: "NET_21",
+                    else: {
+                      $cond: {
+                        if: { $eq: ["$termsDays", 30] },
+                        then: "NET_30",
+                        else: "NET_30",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        hasEmail: {
+          $cond: {
+            if: {
+              $or: [
+                {
+                  $and: [
+                    { $ne: ["$accountsEmail", null] },
+                    { $ne: ["$accountsEmail", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$primaryContactEmail", null] },
+                    { $ne: ["$primaryContactEmail", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$party.email", null] },
+                    { $ne: ["$party.email", ""] },
+                  ],
+                },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+        hasPhone: {
+          $cond: {
+            if: {
+              $or: [
+                {
+                  $and: [
+                    { $ne: ["$primaryContactPhone", null] },
+                    { $ne: ["$primaryContactPhone", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$accountsPhone", null] },
+                    { $ne: ["$accountsPhone", ""] },
+                  ],
+                },
+                {
+                  $and: [
+                    { $ne: ["$party.phone", null] },
+                    { $ne: ["$party.phone", ""] },
+                  ],
+                },
+              ],
+            },
+            then: true,
+            else: false,
+          },
+        },
+      },
+    });
+
+    // Sort by customer number
+    pipeline.push({
+      $sort: { customerNumber: 1 },
+    });
+
+    const customers = await Customer.aggregate(pipeline);
+
+    return customers;
+  }
+
+  /**
+   * Preview customers matching filter criteria for client broadcast
+   * @param {Object} data - Filter criteria
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Count and list of matching customers
+   */
+  static async previewClientBroadcast(data, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validate request
+    const errors = [];
+
+    if (data.filterStates !== undefined && !Array.isArray(data.filterStates)) {
+      errors.push({
+        field: "filterStates",
+        message: "filterStates must be an array",
+      });
+    }
+
+    if (data.filterWorkTypes !== undefined && !Array.isArray(data.filterWorkTypes)) {
+      errors.push({
+        field: "filterWorkTypes",
+        message: "filterWorkTypes must be an array",
+      });
+    }
+
+    if (data.filterCities !== undefined && !Array.isArray(data.filterCities)) {
+      errors.push({
+        field: "filterCities",
+        message: "filterCities must be an array",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Invalid filter data", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Extract filter arrays (default to empty arrays)
+    const filterStates = data.filterStates || [];
+    const filterWorkTypes = data.filterWorkTypes || [];
+    const filterCities = data.filterCities || [];
+
+    // Build aggregation pipeline for efficient filtering
+    const pipeline = [];
+
+    // Match stage: Base customer filters
+    // Note: Customer model doesn't have organizationId directly
+    // Filter by active customers
+    const matchConditions = [
+      {
+        isActive: true,
+      },
+    ];
+
+    // States filter (array contains any)
+    if (filterStates.length > 0) {
+      matchConditions.push({
+        serviceStates: {
+          $in: filterStates,
+        },
+      });
+    }
+
+    // Work types filter (array contains any)
+    // serviceTypes can contain "INTERSTATE" or "METRO"
+    if (filterWorkTypes.length > 0) {
+      matchConditions.push({
+        serviceTypes: {
+          $in: filterWorkTypes,
+        },
+      });
+    }
+
+    // Cities filter (array contains any, case-insensitive)
+    if (filterCities.length > 0) {
+      // Convert cities to uppercase for case-insensitive matching
+      const citiesUpper = filterCities.map((city) => city.trim().toUpperCase());
+      matchConditions.push({
+        serviceCities: {
+          $in: citiesUpper,
+        },
+      });
+    }
+
+    // Combine all match conditions with $and
+    const matchStage = matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0];
+
+    pipeline.push({ $match: matchStage });
+
+    // Lookup stage: Join with Party collection
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    // Unwind party array
+    pipeline.push({
+      $unwind: {
+        path: "$party",
+        preserveNullAndEmptyArrays: true,
+      },
+    });
+
+    // Sort by company name (from Party or Customer)
+    pipeline.push({
+      $sort: {
+        "party.companyName": 1,
+        tradingName: 1,
+        legalCompanyName: 1,
+      },
+    });
+
+    // Get total count (before limiting)
+    const countPipeline = [...pipeline, { $count: "total" }];
+    const countResult = await Customer.aggregate(countPipeline);
+    const totalCount = countResult.length > 0 ? countResult[0].total : 0;
+
+    // Limit results for preview (first 100 customers)
+    pipeline.push({ $limit: 100 });
+
+    // Project stage: Select only needed fields
+    pipeline.push({
+      $project: {
+        _id: 1,
+        tradingName: 1,
+        legalCompanyName: 1,
+        state: 1,
+        "party.companyName": 1,
+        "party.email": 1,
+        "party.phone": 1,
+        "party.state": 1,
+      },
+    });
+
+    // Execute aggregation
+    const customers = await Customer.aggregate(pipeline);
+
+    // Format response
+    const formattedCustomers = customers.map((customer) => {
+      const party = customer.party || {};
+
+      // Get company name from party or customer fields
+      const companyName =
+        party.companyName ||
+        customer.tradingName ||
+        customer.legalCompanyName ||
+        "";
+
+      // Get state from customer or party
+      const state = customer.state || party.state || "";
+
+      // Get email and phone from party
+      const email = party.email || "";
+      const phone = party.phone || "";
+
+      return {
+        id: customer._id.toString(),
+        companyName: companyName,
+        state: state,
+        email: email,
+        phone: phone,
+      };
+    });
+
+    return {
+      count: totalCount,
+      customers: formattedCustomers,
+    };
+  }
+
+  /**
+   * Send client broadcast to customers matching filter criteria
+   * @param {Object} data - Broadcast data (subject, message, method, filters)
+   * @param {Object} user - Authenticated user
+   * @returns {Object} Delivery statistics
+   */
+  static async sendClientBroadcast(data, user) {
+    const organizationId = user.activeOrganizationId || null;
+
+    // Validate required fields
+    if (!data.subject || !data.subject.trim()) {
+      throw new AppError("Subject is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!data.message || !data.message.trim()) {
+      throw new AppError("Message is required", HttpStatusCodes.BAD_REQUEST);
+    }
+
+    if (!data.method || !["EMAIL", "SMS", "BOTH"].includes(data.method)) {
+      throw new AppError(
+        "Method must be EMAIL, SMS, or BOTH",
+        HttpStatusCodes.BAD_REQUEST
+      );
+    }
+
+    // Check if customerIds are provided (new method) or filters (existing method)
+    let customers = [];
+    let totalRecipients = 0;
+    let filterStates = [];
+    let filterWorkTypes = [];
+    let filterCities = [];
+
+    if (data.customerIds && Array.isArray(data.customerIds) && data.customerIds.length > 0) {
+      // New method: Send to specific customer IDs
+      // Validate customer IDs
+      const validCustomerIds = data.customerIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (validCustomerIds.length === 0) {
+        throw new AppError("Invalid customer IDs provided", HttpStatusCodes.BAD_REQUEST);
+      }
+
+      // Get customers by IDs
+      const customerDocs = await Customer.find({
+        _id: { $in: validCustomerIds },
+        isActive: true,
+      })
+        .populate("partyId", "firstName lastName email phone phoneAlt suburb state stateRegion companyName")
+        .lean();
+
+      customers = customerDocs.map((customer) => ({
+        ...customer,
+        party: customer.partyId,
+      }));
+
+      totalRecipients = customers.length;
+    } else {
+      // Existing method: Use filters
+      // Validate filter arrays (same as preview)
+      const errors = [];
+
+    if (data.filterStates !== undefined && !Array.isArray(data.filterStates)) {
+      errors.push({
+        field: "filterStates",
+        message: "filterStates must be an array",
+      });
+    }
+
+    if (data.filterWorkTypes !== undefined && !Array.isArray(data.filterWorkTypes)) {
+      errors.push({
+        field: "filterWorkTypes",
+        message: "filterWorkTypes must be an array",
+      });
+    }
+
+    if (data.filterCities !== undefined && !Array.isArray(data.filterCities)) {
+      errors.push({
+        field: "filterCities",
+        message: "filterCities must be an array",
+      });
+    }
+
+    if (errors.length > 0) {
+      const error = new AppError("Invalid filter data", HttpStatusCodes.BAD_REQUEST);
+      error.errors = errors;
+      throw error;
+    }
+
+    // Extract filter arrays (default to empty arrays)
+    const filterStates = data.filterStates || [];
+    const filterWorkTypes = data.filterWorkTypes || [];
+    const filterCities = data.filterCities || [];
+
+    // Build aggregation pipeline (same as preview, but no limit)
+    const pipeline = [];
+
+    // Match stage: Base customer filters
+    // Note: Customer model doesn't have organizationId directly
+    // Filter by active customers
+    const matchConditions = [
+      {
+        isActive: true,
+      },
+    ];
+
+    // States filter (array contains any)
+    if (filterStates.length > 0) {
+      matchConditions.push({
+        serviceStates: {
+          $in: filterStates,
+        },
+      });
+    }
+
+    // Work types filter (array contains any)
+    if (filterWorkTypes.length > 0) {
+      matchConditions.push({
+        serviceTypes: {
+          $in: filterWorkTypes,
+        },
+      });
+    }
+
+    // Cities filter (array contains any, case-insensitive)
+    if (filterCities.length > 0) {
+      const citiesUpper = filterCities.map((city) => city.trim().toUpperCase());
+      matchConditions.push({
+        serviceCities: {
+          $in: citiesUpper,
+        },
+      });
+    }
+
+    // Combine all match conditions with $and
+    const matchStage = matchConditions.length > 1 ? { $and: matchConditions } : matchConditions[0];
+
+    pipeline.push({ $match: matchStage });
+
+    // Lookup stage: Join with Party collection
+    pipeline.push({
+      $lookup: {
+        from: "parties",
+        localField: "partyId",
+        foreignField: "_id",
+        as: "party",
+      },
+    });
+
+    // Unwind party array
+    pipeline.push({
+      $unwind: {
+        path: "$party",
+        preserveNullAndEmptyArrays: true,
+      },
+    });
+
+      // Get total count
+      const countPipeline = [...pipeline, { $count: "total" }];
+      const countResult = await Customer.aggregate(countPipeline);
+      totalRecipients = countResult.length > 0 ? countResult[0].total : 0;
+
+      if (totalRecipients === 0) {
+        throw new AppError(
+          "No customers match the filter criteria",
+          HttpStatusCodes.BAD_REQUEST
+        );
+      }
+
+      // Project stage: Select needed fields for sending
+      pipeline.push({
+        $project: {
+          _id: 1,
+          tradingName: 1,
+          legalCompanyName: 1,
+          primaryContactName: 1,
+          primaryContactEmail: 1,
+          primaryContactPhone: 1,
+          accountsEmail: 1,
+          accountsPhone: 1,
+          "party.email": 1,
+          "party.phone": 1,
+          "party.phoneAlt": 1,
+          "party.companyName": 1,
+        },
+      });
+
+      // Execute aggregation to get all matching customers
+      const customerResults = await Customer.aggregate(pipeline);
+      customers = customerResults.map((customer) => ({
+        ...customer,
+        party: customer.party || {},
+      }));
+    }
+
+    // Create broadcast record
+    const sentAt = new Date();
+    
+    // Determine filters object
+    let filtersObj = {};
+    if (!data.customerIds || !Array.isArray(data.customerIds) || data.customerIds.length === 0) {
+      // Only set filters if not using customerIds
+      filtersObj = {
+        states: filterStates || [],
+        workTypes: filterWorkTypes || [],
+        cities: filterCities || [],
+      };
+    }
+    
+    const broadcast = await ClientBroadcast.create({
+      subject: data.subject.trim(),
+      message: data.message.trim(),
+      method: data.method,
+      template: data.template || null,
+      priority: data.priority || "normal",
+      totalRecipients: totalRecipients,
+      emailsSent: 0,
+      emailsFailed: 0,
+      smsSent: 0,
+      smsFailed: 0,
+      status: "PENDING",
+      sentByUserId: user._id || user.id,
+      sentAt: sentAt,
+      organizationId: organizationId
+        ? new mongoose.Types.ObjectId(organizationId)
+        : null,
+      filters: filtersObj,
+    });
+
+    // Initialize SendGrid if API key is available
+    if (process.env.SENDGRID_API_KEY) {
+      sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    }
+
+    // Track delivery statistics
+    let emailsSent = 0;
+    let emailsFailed = 0;
+    let smsSent = 0;
+    let smsFailed = 0;
+
+    // Send messages to each customer
+    for (const customer of customers) {
+      const party = customer.party || {};
+      // Get email from accountsEmail, primaryContactEmail, or party.email
+      const email = customer.accountsEmail || customer.primaryContactEmail || party.email;
+      // Get phone from primaryContactPhone, accountsPhone, or party.phone
+      const phone = customer.primaryContactPhone || customer.accountsPhone || party.phone || party.phoneAlt;
+
+      // Send email if method includes EMAIL
+      if (data.method === "EMAIL" || data.method === "BOTH") {
+        if (email && email.trim()) {
+          try {
+            const mailOptions = {
+              to: email.trim(),
+              from: process.env.FROM_EMAIL || "noreply@transporter.digital",
+              subject: data.subject.trim(),
+              text: data.message.trim(),
+              html: data.message.trim().replace(/\n/g, "<br>"),
+            };
+
+            if (process.env.SENDGRID_API_KEY) {
+              await sgMail.send(mailOptions);
+              emailsSent++;
+            } else {
+              // Log if SendGrid not configured
+              console.log(`📧 Would send email to ${email}:`, data.subject);
+              emailsSent++; // Count as sent for development
+            }
+          } catch (error) {
+            console.error(`❌ Failed to send email to ${email}:`, error.message);
+            emailsFailed++;
+          }
+        } else {
+          emailsFailed++;
+        }
+      }
+
+      // Send SMS if method includes SMS
+      if (data.method === "SMS" || data.method === "BOTH") {
+        if (phone && phone.trim()) {
+          try {
+            // TODO: Integrate with actual SMS service (Twilio, AWS SNS, etc.)
+            // For now, just log the SMS
+            const smsMessage = `${data.subject.trim()}\n\n${data.message.trim()}`;
+            console.log(`📱 Sending SMS to ${phone}:`, smsMessage);
+
+            // In production, call SMS service:
+            // await sendSMS(phone, smsMessage);
+
+            smsSent++; // Count as sent for development
+          } catch (error) {
+            console.error(`❌ Failed to send SMS to ${phone}:`, error.message);
+            smsFailed++;
+          }
+        } else {
+          smsFailed++;
+        }
+      }
+    }
+
+    // Determine final status
+    let status = "SENT";
+    if (emailsFailed + smsFailed > 0) {
+      if (emailsSent + smsSent === 0) {
+        status = "FAILED";
+      } else {
+        status = "PARTIAL";
+      }
+    }
+
+    // Update broadcast record with delivery statistics
+    await ClientBroadcast.findByIdAndUpdate(broadcast._id, {
+      emailsSent,
+      emailsFailed,
+      smsSent,
+      smsFailed,
+      status,
+    });
+
+    // Fetch updated broadcast
+    const updatedBroadcast = await ClientBroadcast.findById(broadcast._id).lean();
+
+    return {
+      id: updatedBroadcast._id.toString(),
+      subject: updatedBroadcast.subject,
+      message: updatedBroadcast.message,
+      method: updatedBroadcast.method,
+      template: updatedBroadcast.template || null,
+      priority: updatedBroadcast.priority || "normal",
+      totalRecipients: updatedBroadcast.totalRecipients,
+      emailsSent: updatedBroadcast.emailsSent,
+      emailsFailed: updatedBroadcast.emailsFailed,
+      smsSent: updatedBroadcast.smsSent,
+      smsFailed: updatedBroadcast.smsFailed,
+      status: updatedBroadcast.status,
+      sentBy: updatedBroadcast.sentByUserId.toString(),
+      sentAt: updatedBroadcast.sentAt.toISOString(),
+      createdAt: updatedBroadcast.createdAt.toISOString(),
+    };
+  }
+}
+
+module.exports = BroadcastService;
+
