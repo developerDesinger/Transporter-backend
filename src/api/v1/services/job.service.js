@@ -7,6 +7,7 @@ const InvoiceDraftLine = require("../models/invoiceDraftLine.model");
 const PayRunItem = require("../models/payRunItem.model");
 const AppError = require("../utils/AppError");
 const HttpStatusCodes = require("../enums/httpStatusCode");
+const MapboxService = require("./mapbox.service");
 const mongoose = require("mongoose");
 
 class JobService {
@@ -178,8 +179,8 @@ class JobService {
       // Note: We use placeholder but won't create assignment or include in response
     }
 
-    // Create job
-    const job = await Job.create({
+    // Prepare job data
+    const jobData = {
       jobNumber: jobNumber,
       status: "OPEN", // Job model uses OPEN/CLOSED, not DRAFT
       customerId: new mongoose.Types.ObjectId(data.customerId),
@@ -192,7 +193,55 @@ class JobService {
       organizationId: organizationId
         ? new mongoose.Types.ObjectId(organizationId)
         : null,
-    });
+    };
+
+    // Geocode addresses using Mapbox if pickup and delivery suburbs are provided
+    if (data.pickupSuburb && data.deliverySuburb) {
+      try {
+        const pickupAddress = MapboxService.buildAddressString(data.pickupSuburb, data.pickupState || null);
+        const deliveryAddress = MapboxService.buildAddressString(data.deliverySuburb, data.deliveryState || null);
+
+        if (pickupAddress && deliveryAddress) {
+          const geocodeResult = await MapboxService.geocodeAndRoute(
+            pickupAddress,
+            deliveryAddress,
+            data.pickupState || null,
+            data.deliveryState || null
+          );
+
+          // Add geocoding results to job data
+          if (geocodeResult.pickup) {
+            jobData.pickupLatitude = geocodeResult.pickup.lat;
+            jobData.pickupLongitude = geocodeResult.pickup.lng;
+            jobData.pickupAddress = geocodeResult.pickup.formattedAddress;
+          }
+
+          if (geocodeResult.delivery) {
+            jobData.deliveryLatitude = geocodeResult.delivery.lat;
+            jobData.deliveryLongitude = geocodeResult.delivery.lng;
+            jobData.deliveryAddress = geocodeResult.delivery.formattedAddress;
+          }
+
+          // Add route data if route was calculated successfully
+          if (geocodeResult.route) {
+            jobData.routeGeometry = geocodeResult.route.geometry;
+            jobData.routeDistance = geocodeResult.route.distance;
+            jobData.routeDuration = geocodeResult.route.duration;
+          }
+
+          // Log warning if geocoding failed (but don't fail job creation)
+          if (geocodeResult.error) {
+            console.warn(`Mapbox geocoding warning for job ${jobNumber}: ${geocodeResult.error}`);
+          }
+        }
+      } catch (error) {
+        // Log error but don't fail job creation if geocoding fails
+        console.error(`Mapbox geocoding error for job ${jobNumber}:`, error.message);
+      }
+    }
+
+    // Create job
+    const job = await Job.create(jobData);
 
     // Create assignment if driverId was provided in request
     if (shouldCreateAssignment && driver) {
@@ -245,6 +294,15 @@ class JobService {
       serviceDate: serviceDate.toISOString(), // Return as ISO date
       status: shouldCreateAssignment ? "ASSIGNED" : "DRAFT", // Return status based on assignment
       organizationId: job.organizationId ? job.organizationId.toString() : null,
+      // Mapbox geocoding data
+      pickupLatitude: job.pickupLatitude || null,
+      pickupLongitude: job.pickupLongitude || null,
+      pickupAddress: job.pickupAddress || null,
+      deliveryLatitude: job.deliveryLatitude || null,
+      deliveryLongitude: job.deliveryLongitude || null,
+      deliveryAddress: job.deliveryAddress || null,
+      routeDistance: job.routeDistance || null,
+      routeDuration: job.routeDuration || null,
       createdAt: job.createdAt.toISOString(),
       updatedAt: job.updatedAt.toISOString(),
     };
@@ -352,6 +410,83 @@ class JobService {
     }
 
     return jobNumber;
+  }
+
+  /**
+   * Update geocoding data for a job when addresses change
+   * @param {string} jobId - Job ID
+   * @param {string} pickupSuburb - Pickup suburb
+   * @param {string} deliverySuburb - Delivery suburb
+   * @param {string} pickupState - Optional pickup state
+   * @param {string} deliveryState - Optional delivery state
+   * @returns {Promise<Object | null>} Updated geocoding data or null if failed
+   */
+  static async updateJobGeocoding(jobId, pickupSuburb, deliverySuburb, pickupState = null, deliveryState = null) {
+    if (!pickupSuburb || !deliverySuburb) {
+      return null;
+    }
+
+    try {
+      const pickupAddress = MapboxService.buildAddressString(pickupSuburb, pickupState);
+      const deliveryAddress = MapboxService.buildAddressString(deliverySuburb, deliveryState);
+
+      if (!pickupAddress || !deliveryAddress) {
+        return null;
+      }
+
+      const geocodeResult = await MapboxService.geocodeAndRoute(
+        pickupAddress,
+        deliveryAddress,
+        pickupState,
+        deliveryState
+      );
+
+      const updateData = {};
+
+      if (geocodeResult.pickup) {
+        updateData.pickupLatitude = geocodeResult.pickup.lat;
+        updateData.pickupLongitude = geocodeResult.pickup.lng;
+        updateData.pickupAddress = geocodeResult.pickup.formattedAddress;
+      } else {
+        // Clear geocoding data if geocoding failed
+        updateData.pickupLatitude = null;
+        updateData.pickupLongitude = null;
+        updateData.pickupAddress = null;
+      }
+
+      if (geocodeResult.delivery) {
+        updateData.deliveryLatitude = geocodeResult.delivery.lat;
+        updateData.deliveryLongitude = geocodeResult.delivery.lng;
+        updateData.deliveryAddress = geocodeResult.delivery.formattedAddress;
+      } else {
+        // Clear geocoding data if geocoding failed
+        updateData.deliveryLatitude = null;
+        updateData.deliveryLongitude = null;
+        updateData.deliveryAddress = null;
+      }
+
+      if (geocodeResult.route) {
+        updateData.routeGeometry = geocodeResult.route.geometry;
+        updateData.routeDistance = geocodeResult.route.distance;
+        updateData.routeDuration = geocodeResult.route.duration;
+      } else {
+        // Clear route data if route calculation failed
+        updateData.routeGeometry = null;
+        updateData.routeDistance = null;
+        updateData.routeDuration = null;
+      }
+
+      // Update job with geocoding data
+      await Job.updateOne(
+        { _id: new mongoose.Types.ObjectId(jobId) },
+        { $set: updateData }
+      );
+
+      return geocodeResult;
+    } catch (error) {
+      console.error(`Mapbox geocoding error for job ${jobId}:`, error.message);
+      return null;
+    }
   }
 
   /**
@@ -477,6 +612,15 @@ class JobService {
         serviceDate: serviceDate.toISOString(),
         status: status,
         organizationId: job.organizationId ? job.organizationId.toString() : null,
+        // Mapbox geocoding data
+        pickupLatitude: job.pickupLatitude || null,
+        pickupLongitude: job.pickupLongitude || null,
+        pickupAddress: job.pickupAddress || null,
+        deliveryLatitude: job.deliveryLatitude || null,
+        deliveryLongitude: job.deliveryLongitude || null,
+        deliveryAddress: job.deliveryAddress || null,
+        routeDistance: job.routeDistance || null,
+        routeDuration: job.routeDuration || null,
         createdAt: job.createdAt.toISOString(),
         updatedAt: job.updatedAt.toISOString(),
       };
@@ -731,6 +875,15 @@ class JobService {
       organizationId: updatedJob.organizationId
         ? updatedJob.organizationId.toString()
         : null,
+      // Mapbox geocoding data
+      pickupLatitude: updatedJob.pickupLatitude || null,
+      pickupLongitude: updatedJob.pickupLongitude || null,
+      pickupAddress: updatedJob.pickupAddress || null,
+      deliveryLatitude: updatedJob.deliveryLatitude || null,
+      deliveryLongitude: updatedJob.deliveryLongitude || null,
+      deliveryAddress: updatedJob.deliveryAddress || null,
+      routeDistance: updatedJob.routeDistance || null,
+      routeDuration: updatedJob.routeDuration || null,
       assignment: {
         id: assignment._id.toString(),
         jobId: assignment.jobId.toString(),
