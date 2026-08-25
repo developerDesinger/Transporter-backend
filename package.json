@@ -5,9 +5,9 @@
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node api.js && node server.js",
     "prod": "cross-env NODE_ENV=PRODUCTION node server.js",
-    "dev": "cross-env NODE_ENV=DEVELOPMENT nodemon server.js",
+    "dev": "node api.js && cross-env NODE_ENV=DEVELOPMENT nodemon server.js",
     "clean": "rm -rf node_modules && npm install",
     "test": "echo \"No tests specified\" && exit 0",
     "db:generate": "prisma generate",
